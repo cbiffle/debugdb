@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 
-use dwarfldr::{Type, VariantShape, Variant};
+use dwarfldr::{Type, Variant, VariantShape};
 
 #[derive(Debug, StructOpt)]
 struct Sketch {
@@ -18,9 +18,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Error>> {
+fn dump_file<'a>(
+    object: &'a object::File,
+) -> Result<(), Box<dyn std::error::Error>> {
     let everything = dwarfldr::parse_file(object)?;
-    
+
     println!("-- stuff parsed --");
     for (goff, e) in everything.types() {
         match e {
@@ -37,13 +39,13 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                 println!("    offset: {:x?}", s.offset);
                 println!("    tuple_like: {:?}", s.tuple_like);
                 for m in &s.template_type_parameters {
-                    let tyname = everything.name_from_goff(m.ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(m.ty_goff.into())
                         .unwrap_or("???".into());
-                    println!("    template_type_parameter {}: {} ({:x?})",
-                        m.name,
-                        tyname,
-                        m.ty_goff,
-                        );
+                    println!(
+                        "    template_type_parameter {}: {} ({:x?})",
+                        m.name, tyname, m.ty_goff,
+                    );
                 }
                 for m in s.members.values() {
                     println!("    member:");
@@ -58,7 +60,8 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                     if m.artificial {
                         println!("        artificial: true");
                     }
-                    let tyname = everything.name_from_goff(m.ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(m.ty_goff.into())
                         .unwrap_or("???".into());
                     println!("        type: {:?} ({:x?})", tyname, m.ty_goff);
                 }
@@ -69,13 +72,13 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                 println!("    alignment: {}", s.alignment);
                 println!("    offset: {:x?}", s.offset);
                 for m in &s.template_type_parameters {
-                    let tyname = everything.name_from_goff(m.ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(m.ty_goff.into())
                         .unwrap_or("???".into());
-                    println!("    template_type_parameter {}: {} ({:x?})",
-                        m.name,
-                        tyname,
-                        m.ty_goff,
-                        );
+                    println!(
+                        "    template_type_parameter {}: {} ({:x?})",
+                        m.name, tyname, m.ty_goff,
+                    );
                 }
                 for m in &s.members {
                     println!("    member:");
@@ -88,7 +91,8 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                     if m.artificial {
                         println!("        artificial: true,");
                     }
-                    let tyname = everything.name_from_goff(m.ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(m.ty_goff.into())
                         .unwrap_or("???".into());
                     println!("        type: {:?} ({:x?}),", tyname, m.ty_goff);
                 }
@@ -99,13 +103,13 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                 println!("    alignment: {:?}", s.alignment);
                 println!("    offset: {:x?}", s.offset);
                 for m in &s.template_type_parameters {
-                    let tyname = everything.name_from_goff(m.ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(m.ty_goff.into())
                         .unwrap_or("???".into());
-                    println!("    template_type_parameter {}: {} ({:x?})",
-                        m.name,
-                        tyname,
-                        m.ty_goff,
-                        );
+                    println!(
+                        "    template_type_parameter {}: {} ({:x?})",
+                        m.name, tyname, m.ty_goff,
+                    );
                 }
 
                 let print_variant = |discr_value: Option<u64>, v: &Variant| {
@@ -126,12 +130,15 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                     if m.artificial {
                         println!("        artificial: true,");
                     }
-                    let tyname = everything.name_from_goff(m.ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(m.ty_goff.into())
                         .unwrap_or("???".into());
                     println!("        type: {:?} ({:x?}),", tyname, m.ty_goff);
                 };
                 match &s.variant_part.shape {
-                    VariantShape::Many { member, variants, .. } => {
+                    VariantShape::Many {
+                        member, variants, ..
+                    } => {
                         println!("    discriminator:");
                         if let Some(name) = &member.name {
                             println!("        name: {:?},", name);
@@ -142,9 +149,13 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                         if member.artificial {
                             println!("        artificial: true,");
                         }
-                        let tyname = everything.name_from_goff(member.ty_goff.into())
+                        let tyname = everything
+                            .name_from_goff(member.ty_goff.into())
                             .unwrap_or("???".into());
-                        println!("        type: {:?} ({:x?}),", tyname, member.ty_goff);
+                        println!(
+                            "        type: {:?} ({:x?}),",
+                            tyname, member.ty_goff
+                        );
                         for (&d, v) in variants {
                             print_variant(d, v);
                         }
@@ -154,7 +165,6 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
                     }
                     VariantShape::Zero => (),
                 }
-
             }
             Type::CEnum(s) => {
                 println!("{:x?} = c-like enum {}", goff, s.name);
@@ -170,7 +180,8 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
             }
             Type::Pointer(s) => {
                 println!("{:x?} = ptr {}", goff, s.name);
-                let tyname = everything.name_from_goff(s.ty_goff.into())
+                let tyname = everything
+                    .name_from_goff(s.ty_goff.into())
                     .unwrap_or("???".into());
                 println!("    points_to: {} ({:x?})", tyname, s.ty_goff);
                 println!("    offset: {:x?},", s.offset);
@@ -178,12 +189,14 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
             Type::Subroutine(s) => {
                 println!("{:x?} = subroutine", goff);
                 for &p in &s.formal_parameters {
-                    let tyname = everything.name_from_goff(p.into())
+                    let tyname = everything
+                        .name_from_goff(p.into())
                         .unwrap_or("???".into());
                     println!("    param: {}", tyname);
                 }
                 if let Some(t) = s.return_ty_goff {
-                    let tyname = everything.name_from_goff(t.into())
+                    let tyname = everything
+                        .name_from_goff(t.into())
                         .unwrap_or("???".into());
                     println!("    returns: {}", tyname);
                 }
@@ -191,12 +204,14 @@ fn dump_file<'a>(object: &'a object::File) -> Result<(), Box<dyn std::error::Err
             Type::Array(a) => {
                 println!("{:x?} = array", goff);
                 {
-                    let tyname = everything.name_from_goff(a.element_ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(a.element_ty_goff.into())
                         .unwrap_or("???".into());
                     println!("    element_type: {}", tyname);
                 }
                 {
-                    let tyname = everything.name_from_goff(a.index_ty_goff.into())
+                    let tyname = everything
+                        .name_from_goff(a.index_ty_goff.into())
                         .unwrap_or("???".into());
                     println!("    index_type: {}", tyname);
                 }

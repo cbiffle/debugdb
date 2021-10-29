@@ -1,5 +1,5 @@
-use crate::{Types, Type, Encoding};
-use crate::load::{Load, load_unsigned, choose_variant};
+use crate::load::{choose_variant, load_unsigned, Load};
+use crate::{Encoding, Type, Types};
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
@@ -47,9 +47,9 @@ impl Load for Value {
             Type::Enum(_) => {
                 Ok(Self::Enum(Enum::from_buffer(buffer, addr, world, ty)?))
             }
-            Type::Pointer(_) => {
-                Ok(Self::Pointer(Pointer::from_buffer(buffer, addr, world, ty)?))
-            }
+            Type::Pointer(_) => Ok(Self::Pointer(Pointer::from_buffer(
+                buffer, addr, world, ty,
+            )?)),
             _ => unimplemented!(),
         }
     }
@@ -69,9 +69,7 @@ impl Load for Base {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Base(b) = ty {
             match (b.encoding, b.byte_size) {
-                (Encoding::Unsigned, 1) => {
-                    Ok(Base::U8(buffer[addr]))
-                }
+                (Encoding::Unsigned, 1) => Ok(Base::U8(buffer[addr])),
                 _ => return Err("bad encoding/size".into()),
             }
         } else {
@@ -130,12 +128,7 @@ impl Load for Enum {
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Enum(s) = ty {
-            let v = choose_variant(
-                buffer,
-                addr,
-                world,
-                s,
-            )?;
+            let v = choose_variant(buffer, addr, world, s)?;
 
             let vty_goff = v.member.ty_goff;
             let vty = world.type_from_goff(vty_goff.into()).unwrap();
@@ -167,9 +160,16 @@ impl Load for CEnum {
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::CEnum(s) = ty {
-            let disc_value = load_unsigned(world.endian(), buffer, addr, usize::try_from(s.byte_size).unwrap());
-            
-            let e = s.enumerators.get(&disc_value)
+            let disc_value = load_unsigned(
+                world.endian(),
+                buffer,
+                addr,
+                usize::try_from(s.byte_size).unwrap(),
+            );
+
+            let e = s
+                .enumerators
+                .get(&disc_value)
                 .ok_or("discriminator not valid for c-enum")?;
 
             Ok(Self {
@@ -200,7 +200,7 @@ impl Load for Pointer {
 
         if let Type::Pointer(s) = ty {
             let value = load_unsigned(world.endian(), buffer, addr, 8);
-            
+
             Ok(Self {
                 name: s.name.clone(),
                 dest_ty_goff: s.ty_goff,

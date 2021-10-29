@@ -1,6 +1,6 @@
-use crate::{Types, Type, Encoding, Enum, Variant, VariantShape};
-use std::convert::TryFrom;
+use crate::{Encoding, Enum, Type, Types, Variant, VariantShape};
 use gimli::Reader;
+use std::convert::TryFrom;
 
 pub trait Load: Sized {
     fn from_buffer(
@@ -25,8 +25,18 @@ impl<A: Load, B: Load> Load for (A, B) {
                 let m1 = s.members.get("__1").ok_or("missing __1")?;
                 let m1ty = world.type_from_goff(m1.ty_goff.into()).unwrap();
                 Ok((
-                    A::from_buffer(buffer, addr + usize::try_from(m0.location).unwrap(), world, m0ty)?,
-                    B::from_buffer(buffer, addr + usize::try_from(m1.location).unwrap(), world, m1ty)?,
+                    A::from_buffer(
+                        buffer,
+                        addr + usize::try_from(m0.location).unwrap(),
+                        world,
+                        m0ty,
+                    )?,
+                    B::from_buffer(
+                        buffer,
+                        addr + usize::try_from(m1.location).unwrap(),
+                        world,
+                        m1ty,
+                    )?,
                 ))
             } else {
                 Err("struct had wrong shape".into())
@@ -46,10 +56,10 @@ impl Load for u8 {
     ) -> Result<u8, Box<dyn std::error::Error>> {
         if let Type::Base(b) = ty {
             if b.encoding != Encoding::Unsigned {
-                return Err("bad encoding".into())
+                return Err("bad encoding".into());
             }
             if b.byte_size != 1 {
-                return Err("bad size".into())
+                return Err("bad size".into());
             }
             Ok(buffer[addr])
         } else {
@@ -67,10 +77,10 @@ impl Load for i8 {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Base(b) = ty {
             if b.encoding != Encoding::Unsigned {
-                return Err("bad encoding".into())
+                return Err("bad encoding".into());
             }
             if b.byte_size != 1 {
-                return Err("bad size".into())
+                return Err("bad size".into());
             }
             Ok(buffer[addr] as i8)
         } else {
@@ -90,12 +100,15 @@ macro_rules! base_impl {
             ) -> Result<Self, Box<dyn std::error::Error>> {
                 if let Type::Base(b) = ty {
                     if b.encoding != Encoding::$enc {
-                        return Err("bad encoding".into())
+                        return Err("bad encoding".into());
                     }
-                    if usize::try_from(b.byte_size).unwrap() != std::mem::size_of::<Self>() {
-                        return Err("bad size".into())
+                    if usize::try_from(b.byte_size).unwrap()
+                        != std::mem::size_of::<Self>()
+                    {
+                        return Err("bad size".into());
                     }
-                    Ok(gimli::EndianSlice::new(&buffer[addr..], world.endian()).$read()?)
+                    Ok(gimli::EndianSlice::new(&buffer[addr..], world.endian())
+                        .$read()?)
                 } else {
                     Err("bad type".into())
                 }
@@ -122,14 +135,18 @@ impl<T: Load> Load for Vec<T> {
         if let Type::Array(s) = ty {
             let count = s.count.ok_or("non-finite array type")?;
             if s.lower_bound != 0 {
-                return Err("array with non-zero lower bound not supported".into());
+                return Err(
+                    "array with non-zero lower bound not supported".into()
+                );
             }
             let elty = world.type_from_goff(s.element_ty_goff.into()).unwrap();
 
-            let elt_size = elty.byte_size(world)
+            let elt_size = elty
+                .byte_size(world)
                 .ok_or("non-Sized type can't be array element")?;
             let elt_size = elt_size.max(elty.alignment(world).unwrap_or(0));
-            let ary_size = elt_size.checked_mul(count)
+            let ary_size = elt_size
+                .checked_mul(count)
                 .ok_or("array larger than memory")?;
 
             let elt_size = usize::try_from(elt_size)?;
@@ -188,7 +205,8 @@ impl<T: Load> Load for Option<T> {
                 if is_some {
                     if s.members.len() == 1 {
                         let m = &s.members[0];
-                        let mty = world.type_from_goff(m.ty_goff.into()).unwrap();
+                        let mty =
+                            world.type_from_goff(m.ty_goff.into()).unwrap();
                         let ma = addr + usize::try_from(m.location).unwrap();
                         Ok(Some(T::from_buffer(buffer, ma, world, mty)?))
                     } else {
@@ -220,16 +238,17 @@ pub(crate) fn choose_variant<'e>(
         VariantShape::Zero => {
             return Err("load of uninhabited enum".into());
         }
-        VariantShape::One(v) => {
-            Ok(v)
-        }
-        VariantShape::Many { member, variants, .. } => {
+        VariantShape::One(v) => Ok(v),
+        VariantShape::Many {
+            member, variants, ..
+        } => {
             let dty_goff = member.ty_goff;
             let dty = world.type_from_goff(dty_goff.into()).unwrap();
             let da = addr + usize::try_from(member.location)?;
             let dsize = usize::try_from(dty.byte_size(world).unwrap()).unwrap();
             let d = load_unsigned(world.endian(), buffer, da, dsize);
-            let v = variants.get(&Some(d))
+            let v = variants
+                .get(&Some(d))
                 .or_else(|| variants.get(&None))
                 .ok_or("discriminator not defined in type")?;
             Ok(v)
@@ -237,7 +256,12 @@ pub(crate) fn choose_variant<'e>(
     }
 }
 
-pub(crate) fn load_unsigned(endian: gimli::RunTimeEndian, buffer: &[u8], addr: usize, size: usize) -> u64 {
+pub(crate) fn load_unsigned(
+    endian: gimli::RunTimeEndian,
+    buffer: &[u8],
+    addr: usize,
+    size: usize,
+) -> u64 {
     let mut buffer = gimli::EndianSlice::new(&buffer[addr..], endian);
     match size {
         1 => u64::from(buffer.read_u8().unwrap()),
@@ -286,7 +310,7 @@ mod test {
             offset: none_goff,
             tuple_like: true,
             template_type_parameters: vec![],
-            members: indexmap::indexmap!{},
+            members: indexmap::indexmap! {},
         });
 
         let some_goff = om.next();
@@ -297,7 +321,7 @@ mod test {
             offset: some_goff,
             tuple_like: true,
             template_type_parameters: vec![],
-            members: indexmap::indexmap!{
+            members: indexmap::indexmap! {
                 "__0".to_string() => crate::Member {
                     name: Some("__0".to_string()),
                     artificial: false,
@@ -362,7 +386,8 @@ mod test {
     #[test]
     fn load_option_u16() {
         let mut om = OffsetMaker::default();
-        let mut builder = TypesBuilder::new(gimli::RunTimeEndian::Little, false);
+        let mut builder =
+            TypesBuilder::new(gimli::RunTimeEndian::Little, false);
 
         let option_goff = make_option_u16(&mut builder, &mut om);
 
@@ -370,15 +395,22 @@ mod test {
         let oty = world.type_from_goff(option_goff).unwrap();
 
         let img = [0, 0, 0xAB, 0xCD];
-        assert_eq!(Option::<u16>::from_buffer(&img, 0, &world, oty).unwrap(), None);
+        assert_eq!(
+            Option::<u16>::from_buffer(&img, 0, &world, oty).unwrap(),
+            None
+        );
         let img = [1, 0, 0xAB, 0xCD];
-        assert_eq!(Option::<u16>::from_buffer(&img, 0, &world, oty).unwrap(), Some(0xCDAB));
+        assert_eq!(
+            Option::<u16>::from_buffer(&img, 0, &world, oty).unwrap(),
+            Some(0xCDAB)
+        );
     }
 
     #[test]
     fn load_u8_array() {
         let mut om = OffsetMaker::default();
-        let mut builder = TypesBuilder::new(gimli::RunTimeEndian::Little, false);
+        let mut builder =
+            TypesBuilder::new(gimli::RunTimeEndian::Little, false);
 
         let u8_goff = om.next();
         builder.record_type(crate::Base {

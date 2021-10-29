@@ -1,10 +1,15 @@
-pub mod value;
 pub mod load;
+pub mod value;
 
-use std::collections::{BTreeMap, BTreeSet};
+use indexmap::IndexMap;
 use object::{Object, ObjectSection};
 use std::borrow::Cow;
-use indexmap::IndexMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use gimli::constants as gim_con;
+
+// Internal type abbreviations
+type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
 
 /// A database of types extracted from the debug info of a program.
 ///
@@ -54,9 +59,10 @@ impl Types {
 
     /// Produces an iterator over all types defined in the program, together
     /// with their unique section offsets.
-    pub fn types(&self) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
-        self.types.iter()
-            .map(|(&goff, ty)| (goff, ty))
+    pub fn types(
+        &self,
+    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
+        self.types.iter().map(|(&goff, ty)| (goff, ty))
     }
 
     /// Looks up the type corresponding to a unique section offset. If the
@@ -65,7 +71,10 @@ impl Types {
     ///
     /// If you've gotten `goff` from somewhere else, you may or may not find a
     /// type.
-    pub fn type_from_goff(&self, goff: gimli::UnitSectionOffset) -> Option<&Type> {
+    pub fn type_from_goff(
+        &self,
+        goff: gimli::UnitSectionOffset,
+    ) -> Option<&Type> {
         self.types.get(&goff)
     }
 
@@ -73,7 +82,10 @@ impl Types {
     ///
     /// If the offset was found inside another type in `self`, our consistency
     /// rules guarantee that this will return `Some`.
-    pub fn name_from_goff(&self, goff: gimli::UnitSectionOffset) -> Option<Cow<'_, str>> {
+    pub fn name_from_goff(
+        &self,
+        goff: gimli::UnitSectionOffset,
+    ) -> Option<Cow<'_, str>> {
         Some(self.type_from_goff(goff)?.name(self))
     }
 
@@ -82,15 +94,25 @@ impl Types {
     ///
     /// Names are matched in their entirety, e.g. the name `"Option"` does not
     /// match a type `"core::option::Option<u16>"`.
-    pub fn types_by_name(&self, name: &str) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
-        self.type_name_index.get(name)
+    pub fn types_by_name(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
+        self.type_name_index
+            .get(name)
             .into_iter()
-            .flat_map(move |set| set.iter()
-                .map(move |&goff| (goff, &self.types[&goff])))
+            .flat_map(move |set| {
+                set.iter().map(move |&goff| (goff, &self.types[&goff]))
+            })
     }
 }
 
-
+/// Builder that accumulates the type information from a program and produces a
+/// `Types` database.
+///
+/// This is primarily intended as a write-only sink for type information. After
+/// everything is stuffed in, `build()` will validate the information, generate
+/// indices, and produce a `Types` database.
 #[derive(Clone, Debug)]
 pub struct TypesBuilder {
     path: Vec<String>,
@@ -100,6 +122,8 @@ pub struct TypesBuilder {
 }
 
 impl TypesBuilder {
+    /// Creates a new `TypesBuilder` for information from a program with the
+    /// given endianness and pointer width.
     pub fn new(endian: gimli::RunTimeEndian, is_64: bool) -> Self {
         Self {
             endian,
@@ -107,26 +131,6 @@ impl TypesBuilder {
             is_64,
             types: BTreeMap::new(),
         }
-    }
-
-    pub fn record_type(&mut self, t: impl Into<Type>) {
-        let t = t.into();
-        self.types.insert(t.offset(), t);
-    }
-
-    pub fn format_path(&self, name: impl std::fmt::Display) -> String {
-        if self.path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{}::{}", self.path.join("::"), name)
-        }
-    }
-
-    pub fn path_component<T>(&mut self, c: impl Into<String>, body: impl FnOnce(&mut Self) -> T) -> T {
-        self.path.push(c.into());
-        let result = body(self);
-        self.path.pop();
-        result
     }
 
     pub fn build(self) -> Result<Types, Box<dyn std::error::Error>> {
@@ -168,7 +172,9 @@ impl TypesBuilder {
                         VariantShape::One(variant) => {
                             check(variant.member.ty_goff)?;
                         }
-                        VariantShape::Many { member, variants, .. } => {
+                        VariantShape::Many {
+                            member, variants, ..
+                        } => {
                             check(member.ty_goff)?;
                             for v in variants.values() {
                                 check(v.member.ty_goff)?;
@@ -197,24 +203,51 @@ impl TypesBuilder {
 
         // Build type name index. We only index types with inherent names, i.e.
         // not arrays or subroutines.
-        let type_name_index = index_by_key(
-            &self.types,
-            |_, t| match t {
-                Type::Struct(s) => Some(s.name.clone()),
-                Type::Enum(s) => Some(s.name.clone()),
-                Type::Base(s) => Some(s.name.clone()),
-                Type::CEnum(s) => Some(s.name.clone()),
-                Type::Union(s) => Some(s.name.clone()),
-                Type::Pointer(s) => Some(s.name.clone()),
-                _ => None,
-            },
-        );
+        let type_name_index = index_by_key(&self.types, |_, t| match t {
+            Type::Struct(s) => Some(s.name.clone()),
+            Type::Enum(s) => Some(s.name.clone()),
+            Type::Base(s) => Some(s.name.clone()),
+            Type::CEnum(s) => Some(s.name.clone()),
+            Type::Union(s) => Some(s.name.clone()),
+            Type::Pointer(s) => Some(s.name.clone()),
+            _ => None,
+        });
         Ok(Types {
             endian: self.endian,
             types: self.types,
             is_64: self.is_64,
             type_name_index,
         })
+    }
+
+    /// Adds a type to the database.
+    ///
+    /// It's unusual to call this from outside the library, but it might be
+    /// useful if you have additional type information from some outside source.
+    pub fn record_type(&mut self, t: impl Into<Type>) {
+        let t = t.into();
+        self.types.insert(t.offset(), t);
+    }
+
+    fn format_path(&self, name: impl std::fmt::Display) -> String {
+        if self.path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", self.path.join("::"), name)
+        }
+    }
+
+    /// Pushes a path component onto the namespace path stack and runs `body`,
+    /// popping the stack when it completes.
+    fn path_component<T>(
+        &mut self,
+        c: impl Into<String>,
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.path.push(c.into());
+        let result = body(self);
+        self.path.pop();
+        result
     }
 }
 
@@ -230,41 +263,45 @@ fn index_by_key<'t, K: 't, V: 't, T>(
     table: impl IntoIterator<Item = (&'t K, &'t V)>,
     mut project: impl FnMut(&K, &V) -> Option<T>,
 ) -> BTreeMap<T, BTreeSet<K>>
-where T: Ord,
-      K: Ord + Clone,
+where
+    T: Ord,
+    K: Ord + Clone,
 {
     let mut index: BTreeMap<T, BTreeSet<K>> = BTreeMap::new();
 
     for (k, v) in table {
         if let Some(i) = project(k, v) {
-            index.entry(i)
-                .or_default()
-                .insert(k.clone());
+            index.entry(i).or_default().insert(k.clone());
         }
     }
 
     index
 }
 
-pub fn parse_file<'a>(object: &'a object::File) -> Result<Types, Box<dyn std::error::Error>> {
+/// Parses type information from an `object::File`.
+pub fn parse_file<'a>(
+    object: &'a object::File,
+) -> Result<Types, Box<dyn std::error::Error>> {
     let endian = if object.is_little_endian() {
         gimli::RunTimeEndian::Little
     } else {
         gimli::RunTimeEndian::Big
     };
 
-    let load_section = |id: gimli::SectionId| -> Result<Cow<'a, [u8]>, gimli::Error> {
-        match object.section_by_name(id.name()) {
-            Some(section) => Ok(section
-                .uncompressed_data()
-                .unwrap_or(Default::default())),
-            None => Ok(Default::default()),
-        }
-    };
+    let load_section =
+        |id: gimli::SectionId| -> Result<Cow<'a, [u8]>, gimli::Error> {
+            match object.section_by_name(id.name()) {
+                Some(section) => Ok(section
+                    .uncompressed_data()
+                    .unwrap_or(Default::default())),
+                None => Ok(Default::default()),
+            }
+        };
 
     let dwarf_cow = gimli::Dwarf::load(&load_section)?;
 
-    let dwarf = dwarf_cow.borrow(|section| gimli::EndianSlice::new(section, endian));
+    let dwarf =
+        dwarf_cow.borrow(|section| gimli::EndianSlice::new(section, endian));
 
     let mut iter = dwarf.units();
     let mut builder = TypesBuilder::new(endian, object.is_64());
@@ -277,48 +314,45 @@ pub fn parse_file<'a>(object: &'a object::File) -> Result<Types, Box<dyn std::er
             if entries.current().is_none() {
                 break;
             }
-            parse_entry(
-                &dwarf,
-                &unit,
-                &mut entries,
-                &mut builder,
-            )?;
+            parse_entry(&dwarf, &unit, &mut entries, &mut builder)?;
         }
     }
 
     builder.build()
 }
 
+/// Factored out of parsers for DWARF entities that can contain types. This
+/// dispatches between the type or namespace parsing routines based on tag.
 fn handle_nested_types(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(child) = cursor.current() {
         match child.tag() {
-            gimli::constants::DW_TAG_base_type => {
+            gim_con::DW_TAG_base_type => {
                 parse_base_type(dwarf, unit, cursor, builder)?;
             }
-            gimli::constants::DW_TAG_structure_type => {
+            gim_con::DW_TAG_structure_type => {
                 parse_structure_type(dwarf, unit, cursor, builder)?;
             }
-            gimli::constants::DW_TAG_enumeration_type => {
+            gim_con::DW_TAG_enumeration_type => {
                 parse_enumeration_type(dwarf, unit, cursor, builder)?;
             }
-            gimli::constants::DW_TAG_array_type => {
+            gim_con::DW_TAG_array_type => {
                 parse_array_type(dwarf, unit, cursor, builder)?;
             }
-            gimli::constants::DW_TAG_pointer_type => {
+            gim_con::DW_TAG_pointer_type => {
                 parse_pointer_type(dwarf, unit, cursor, builder)?;
             }
-            gimli::constants::DW_TAG_subroutine_type => {
+            gim_con::DW_TAG_subroutine_type => {
                 parse_subroutine_type(dwarf, unit, cursor, builder)?;
             }
-            gimli::constants::DW_TAG_union_type => {
+            gim_con::DW_TAG_union_type => {
                 parse_union_type(dwarf, unit, cursor, builder)?;
             }
-            gimli::constants::DW_TAG_namespace => {
+            gim_con::DW_TAG_namespace => {
                 parse_namespace(dwarf, unit, cursor, builder)?;
             }
             _ => {
@@ -331,9 +365,9 @@ fn handle_nested_types(
 }
 
 fn parse_entry(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -357,19 +391,19 @@ fn parse_entry(
 }
 
 fn parse_namespace(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_namespace);
+    assert!(entry.tag() == gim_con::DW_TAG_namespace);
     let mut name = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
             _ => (),
@@ -386,7 +420,6 @@ fn parse_namespace(
                 } else {
                     break;
                 }
-
             }
             Ok(())
         })
@@ -400,7 +433,7 @@ pub struct Base {
     pub name: String,
     pub encoding: Encoding,
     pub byte_size: u64,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -415,13 +448,13 @@ pub enum Encoding {
 }
 
 fn parse_base_type(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_base_type);
+    assert!(entry.tag() == gim_con::DW_TAG_base_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut name = None;
@@ -431,22 +464,22 @@ fn parse_base_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_byte_size => {
+            gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_encoding => {
+            gim_con::DW_AT_encoding => {
                 if let gimli::AttributeValue::Encoding(e) = attr.value() {
                     encoding = Some(match e {
-                        gimli::constants::DW_ATE_unsigned => Encoding::Unsigned,
-                        gimli::constants::DW_ATE_signed => Encoding::Signed,
-                        gimli::constants::DW_ATE_boolean => Encoding::Boolean,
-                        gimli::constants::DW_ATE_unsigned_char => Encoding::UnsignedChar,
-                        gimli::constants::DW_ATE_signed_char => Encoding::SignedChar,
-                        gimli::constants::DW_ATE_float => Encoding::Float,
-                        gimli::constants::DW_ATE_complex_float => Encoding::ComplexFloat,
+                        gim_con::DW_ATE_unsigned => Encoding::Unsigned,
+                        gim_con::DW_ATE_signed => Encoding::Signed,
+                        gim_con::DW_ATE_boolean => Encoding::Boolean,
+                        gim_con::DW_ATE_unsigned_char => Encoding::UnsignedChar,
+                        gim_con::DW_ATE_signed_char => Encoding::SignedChar,
+                        gim_con::DW_ATE_float => Encoding::Float,
+                        gim_con::DW_ATE_complex_float => Encoding::ComplexFloat,
                         _ => panic!("unsupported encoding: {:?}", e),
                     });
                 } else {
@@ -478,7 +511,7 @@ pub struct Struct {
     pub template_type_parameters: Vec<TemplateTypeParameter>,
     pub tuple_like: bool,
     pub members: IndexMap<String, Member>,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 #[derive(Debug, Clone)]
@@ -488,7 +521,7 @@ pub struct Enum {
     pub alignment: Option<u64>,
     pub template_type_parameters: Vec<TemplateTypeParameter>,
     pub variant_part: VariantPart,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 #[derive(Debug, Clone)]
@@ -504,7 +537,7 @@ pub enum Type {
 }
 
 impl Type {
-    pub fn offset(&self) -> gimli::UnitSectionOffset<usize> {
+    pub fn offset(&self) -> gimli::UnitSectionOffset {
         // TODO so this field should clearly get factored out....
         match self {
             Self::Struct(s) => s.offset,
@@ -526,7 +559,7 @@ impl Type {
                 // TODO: we're going to just assume that all base types are
                 // naturally aligned.
                 Some(s.byte_size)
-            },
+            }
             Self::CEnum(s) => Some(s.alignment),
             Self::Union(s) => Some(s.alignment),
             Self::Array(a) => {
@@ -534,7 +567,7 @@ impl Type {
                 eltty.alignment(world)
             }
             Self::Pointer(_) => Some(world.pointer_size()),
-            Self::Subroutine(_)=> None,
+            Self::Subroutine(_) => None,
         }
     }
 
@@ -551,7 +584,7 @@ impl Type {
                 Some(a.count? * eltsize)
             }
             Self::Pointer(_) => Some(world.pointer_size()),
-            Self::Subroutine(_)=> None,
+            Self::Subroutine(_) => None,
         }
     }
 
@@ -564,7 +597,8 @@ impl Type {
             Self::Union(s) => (&s.name).into(),
             Self::Pointer(s) => (&s.name).into(),
             Self::Array(a) => {
-                let eltname = world.type_from_goff(a.element_ty_goff.into())
+                let eltname = world
+                    .type_from_goff(a.element_ty_goff.into())
                     .map(|t| t.name(world))
                     .unwrap_or("???".into());
 
@@ -573,7 +607,7 @@ impl Type {
                 } else {
                     format!("[{}; ???]", eltname).into()
                 }
-            },
+            }
             Self::Subroutine(_) => "subroutine".into(), // TODO
         }
     }
@@ -628,13 +662,13 @@ impl From<Subroutine> for Type {
 }
 
 fn parse_structure_type(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_structure_type);
+    assert!(entry.tag() == gim_con::DW_TAG_structure_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut name = None;
@@ -644,16 +678,16 @@ fn parse_structure_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_byte_size => {
+            gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_alignment => {
+            gim_con::DW_AT_alignment => {
                 alignment = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_declaration => {
+            gim_con::DW_AT_declaration => {
                 skip_entry(cursor)?;
                 return Ok(());
             }
@@ -671,25 +705,31 @@ fn parse_structure_type(
             while let Some(()) = cursor.next_entry()? {
                 if let Some(child) = cursor.current() {
                     match child.tag() {
-                        gimli::constants::DW_TAG_template_type_parameter => {
+                        gim_con::DW_TAG_template_type_parameter => {
                             template_type_parameters.push(
-                                parse_template_type_parameter(dwarf, unit, cursor)?
+                                parse_template_type_parameter(
+                                    dwarf, unit, cursor,
+                                )?,
                             );
                         }
-                        gimli::constants::DW_TAG_member => {
+                        gim_con::DW_TAG_member => {
                             let m = parse_member(dwarf, unit, cursor)?;
                             if let Some(n) = &m.name {
-                                if let Some(old_m) = members.insert(n.clone(), m) {
-                                    panic!("duplicate member for name {:?}", old_m.name);
+                                if let Some(old_m) =
+                                    members.insert(n.clone(), m)
+                                {
+                                    panic!(
+                                        "duplicate member for name {:?}",
+                                        old_m.name
+                                    );
                                 }
                             } else {
                                 panic!("nameless member confuse author");
                             }
                         }
-                        gimli::constants::DW_TAG_variant_part => {
-                            variant_parts.push(
-                                parse_variant_part(dwarf, unit, cursor)?
-                            );
+                        gim_con::DW_TAG_variant_part => {
+                            variant_parts
+                                .push(parse_variant_part(dwarf, unit, cursor)?);
                         }
                         _ => {
                             handle_nested_types(dwarf, unit, cursor, builder)?;
@@ -698,7 +738,6 @@ fn parse_structure_type(
                 } else {
                     break;
                 }
-
             }
             Ok::<_, Box<dyn std::error::Error>>(())
         })?;
@@ -729,7 +768,11 @@ fn parse_structure_type(
             tuple_like,
         });
     } else if variant_parts.len() == 1 {
-        assert!(members.is_empty(), "expected no members next to variant part, found {}", members.len());
+        assert!(
+            members.is_empty(),
+            "expected no members next to variant part, found {}",
+            members.len()
+        );
         let variant_part = variant_parts.into_iter().next().unwrap();
         builder.record_type(Enum {
             name,
@@ -740,7 +783,10 @@ fn parse_structure_type(
             variant_part,
         });
     } else {
-        panic!("expected 1 variant part at most, found {}", variant_parts.len());
+        panic!(
+            "expected 1 variant part at most, found {}",
+            variant_parts.len()
+        );
     }
     Ok(())
 }
@@ -752,12 +798,12 @@ pub struct TemplateTypeParameter {
 }
 
 fn parse_template_type_parameter(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<TemplateTypeParameter, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_template_type_parameter);
+    assert!(entry.tag() == gim_con::DW_TAG_template_type_parameter);
 
     let mut ty_goff = None;
     let mut name = None;
@@ -765,13 +811,15 @@ fn parse_template_type_parameter(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_type => {
+            gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     ty_goff = Some(o.to_unit_section_offset(&unit));
-                } else if let gimli::AttributeValue::DebugInfoRef(o) = attr.value() {
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
                     ty_goff = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
@@ -794,16 +842,16 @@ pub struct Member {
     pub ty_goff: gimli::UnitSectionOffset,
     pub alignment: Option<u64>,
     pub location: u64,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 fn parse_member(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<Member, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_member);
+    assert!(entry.tag() == gim_con::DW_TAG_member);
 
     let mut name = None;
     let mut ty_goff = None;
@@ -814,30 +862,30 @@ fn parse_member(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_artificial => {
-                match attr.value() {
-                    gimli::AttributeValue::Flag(f) => {
-                        artificial = f;
-                    }
-                    v => panic!("unexpected artificial value: {:?}", v),
+            gim_con::DW_AT_artificial => match attr.value() {
+                gimli::AttributeValue::Flag(f) => {
+                    artificial = f;
                 }
-            }
-            gimli::constants::DW_AT_type => {
+                v => panic!("unexpected artificial value: {:?}", v),
+            },
+            gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     ty_goff = Some(o.to_unit_section_offset(&unit));
-                } else if let gimli::AttributeValue::DebugInfoRef(o) = attr.value() {
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
                     ty_goff = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
             }
-            gimli::constants::DW_AT_alignment => {
+            gim_con::DW_AT_alignment => {
                 alignment = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_data_member_location => {
+            gim_con::DW_AT_data_member_location => {
                 location = Some(attr.value().udata_value().unwrap());
             }
             _ => (),
@@ -861,7 +909,7 @@ fn parse_member(
 
 #[derive(Debug, Clone)]
 pub struct VariantPart {
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
     pub shape: VariantShape,
 }
 
@@ -870,19 +918,19 @@ pub enum VariantShape {
     Zero,
     One(Variant),
     Many {
-        discr: gimli::UnitSectionOffset<usize>,
+        discr: gimli::UnitSectionOffset,
         member: Member,
         variants: IndexMap<Option<u64>, Variant>,
     },
 }
 
 fn parse_variant_part(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<VariantPart, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_variant_part);
+    assert!(entry.tag() == gim_con::DW_TAG_variant_part);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut discr = None;
@@ -890,7 +938,7 @@ fn parse_variant_part(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_discr => {
+            gim_con::DW_AT_discr => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     discr = Some(o.to_unit_section_offset(&unit));
                 } else {
@@ -907,13 +955,12 @@ fn parse_variant_part(
         while let Some(()) = cursor.next_entry()? {
             if let Some(child) = cursor.current() {
                 match child.tag() {
-                    gimli::constants::DW_TAG_member => {
-                        members.push(
-                            parse_member(dwarf, unit, cursor)?
-                        );
+                    gim_con::DW_TAG_member => {
+                        members.push(parse_member(dwarf, unit, cursor)?);
                     }
-                    gimli::constants::DW_TAG_variant => {
-                        let (discr_value, v) = parse_variant(dwarf, unit, cursor)?;
+                    gim_con::DW_TAG_variant => {
+                        let (discr_value, v) =
+                            parse_variant(dwarf, unit, cursor)?;
                         variants.insert(discr_value, v);
                     }
                     _ => {
@@ -933,7 +980,6 @@ fn parse_variant_part(
     let shape = if variants.len() == 0 {
         VariantShape::Zero
     } else if variants.len() == 1 {
-
         if let Some(d) = variants.keys().next().unwrap() {
             VariantShape::Many {
                 discr: discr.unwrap(),
@@ -951,25 +997,22 @@ fn parse_variant_part(
             variants,
         }
     };
-    Ok(VariantPart {
-        shape,
-        offset,
-    })
+    Ok(VariantPart { shape, offset })
 }
 
 #[derive(Debug, Clone)]
 pub struct Variant {
     pub member: Member,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 fn parse_variant(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<(Option<u64>, Variant), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_variant);
+    assert!(entry.tag() == gim_con::DW_TAG_variant);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut discr_value = None;
@@ -977,7 +1020,7 @@ fn parse_variant(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_discr_value => {
+            gim_con::DW_AT_discr_value => {
                 discr_value = Some(attr.value().udata_value().unwrap());
             }
             _ => (),
@@ -989,10 +1032,8 @@ fn parse_variant(
         while let Some(()) = cursor.next_entry()? {
             if let Some(child) = cursor.current() {
                 match child.tag() {
-                    gimli::constants::DW_TAG_member => {
-                        members.push(
-                            parse_member(dwarf, unit, cursor)?
-                        );
+                    gim_con::DW_TAG_member => {
+                        members.push(parse_member(dwarf, unit, cursor)?);
                     }
                     _ => {
                         skip_entry(cursor)?;
@@ -1005,7 +1046,10 @@ fn parse_variant(
     }
 
     if members.len() > 1 {
-        panic!("Variants are expected to have a single member; this one has {}", members.len());
+        panic!(
+            "Variants are expected to have a single member; this one has {}",
+            members.len()
+        );
     }
     let member = members.into_iter().next().unwrap();
 
@@ -1019,24 +1063,24 @@ pub struct CEnum {
     pub byte_size: u64,
     pub alignment: u64,
     pub enumerators: IndexMap<u64, Enumerator>,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 #[derive(Debug, Clone)]
 pub struct Enumerator {
     pub name: String,
     pub const_value: u64,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 fn parse_enumeration_type(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_enumeration_type);
+    assert!(entry.tag() == gim_con::DW_TAG_enumeration_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut name = None;
@@ -1047,16 +1091,16 @@ fn parse_enumeration_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_byte_size => {
+            gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_alignment => {
+            gim_con::DW_AT_alignment => {
                 alignment = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_enum_class => {
+            gim_con::DW_AT_enum_class => {
                 enum_class = attr.value() == gimli::AttributeValue::Flag(true);
             }
             _ => (),
@@ -1071,7 +1115,7 @@ fn parse_enumeration_type(
             while let Some(()) = cursor.next_entry()? {
                 if let Some(child) = cursor.current() {
                     match child.tag() {
-                        gimli::constants::DW_TAG_enumerator => {
+                        gim_con::DW_TAG_enumerator => {
                             let e = parse_enumerator(dwarf, unit, cursor)?;
                             enumerators.insert(e.const_value, e);
                         }
@@ -1082,7 +1126,6 @@ fn parse_enumeration_type(
                 } else {
                     break;
                 }
-
             }
             Ok::<_, Box<dyn std::error::Error>>(())
         })?;
@@ -1103,12 +1146,12 @@ fn parse_enumeration_type(
 }
 
 fn parse_enumerator(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<Enumerator, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_enumerator);
+    assert!(entry.tag() == gim_con::DW_TAG_enumerator);
 
     let mut name = None;
     let mut const_value = None;
@@ -1116,13 +1159,18 @@ fn parse_enumerator(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_const_value => {
-                const_value = Some(attr.value().udata_value()
-                    .or_else(|| attr.value().sdata_value().map(|x| x as u64))
-                    .unwrap());
+            gim_con::DW_AT_const_value => {
+                const_value = Some(
+                    attr.value()
+                        .udata_value()
+                        .or_else(|| {
+                            attr.value().sdata_value().map(|x| x as u64)
+                        })
+                        .unwrap(),
+                );
             }
             _ => (),
         }
@@ -1144,17 +1192,17 @@ pub struct Array {
     pub index_ty_goff: gimli::UnitSectionOffset,
     pub lower_bound: u64,
     pub count: Option<u64>,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 fn parse_array_type(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_array_type);
+    assert!(entry.tag() == gim_con::DW_TAG_array_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut element_ty_goff = None;
@@ -1162,10 +1210,12 @@ fn parse_array_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_type => {
+            gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     element_ty_goff = Some(o.to_unit_section_offset(&unit));
-                } else if let gimli::AttributeValue::DebugInfoRef(o) = attr.value() {
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
                     element_ty_goff = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
@@ -1182,8 +1232,9 @@ fn parse_array_type(
         while let Some(()) = cursor.next_entry()? {
             if let Some(child) = cursor.current() {
                 match child.tag() {
-                    gimli::constants::DW_TAG_subrange_type => {
-                        subrange = Some(parse_subrange_type(dwarf, unit, cursor)?);
+                    gim_con::DW_TAG_subrange_type => {
+                        subrange =
+                            Some(parse_subrange_type(dwarf, unit, cursor)?);
                     }
                     _ => {
                         skip_entry(cursor)?;
@@ -1192,7 +1243,6 @@ fn parse_array_type(
             } else {
                 break;
             }
-
         }
     }
     let (index_ty_goff, lower_bound, count) = subrange.unwrap();
@@ -1208,12 +1258,15 @@ fn parse_array_type(
 }
 
 fn parse_subrange_type(
-    _dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
-) -> Result<(gimli::UnitSectionOffset, u64, Option<u64>), Box<dyn std::error::Error>> {
+    _dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+) -> Result<
+    (gimli::UnitSectionOffset, u64, Option<u64>),
+    Box<dyn std::error::Error>,
+> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_subrange_type);
+    assert!(entry.tag() == gim_con::DW_TAG_subrange_type);
 
     let mut ty_goff = None;
     let mut lower_bound = None;
@@ -1222,21 +1275,23 @@ fn parse_subrange_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_type => {
+            gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     ty_goff = Some(o.to_unit_section_offset(&unit));
-                } else if let gimli::AttributeValue::DebugInfoRef(o) = attr.value() {
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
                     ty_goff = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
             }
-            gimli::constants::DW_AT_lower_bound => {
+            gim_con::DW_AT_lower_bound => {
                 lower_bound = Some(attr.value().udata_value().unwrap());
-            },
-            gimli::constants::DW_AT_count => {
+            }
+            gim_con::DW_AT_count => {
                 count = Some(attr.value().udata_value().unwrap());
-            },
+            }
             _ => (),
         }
     }
@@ -1256,7 +1311,6 @@ fn parse_subrange_type(
             } else {
                 break;
             }
-
         }
     }
     Ok((ty_goff, lower_bound, count))
@@ -1266,17 +1320,17 @@ fn parse_subrange_type(
 pub struct Pointer {
     pub ty_goff: gimli::UnitSectionOffset,
     pub name: String,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 fn parse_pointer_type(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_pointer_type);
+    assert!(entry.tag() == gim_con::DW_TAG_pointer_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut name = None;
@@ -1285,19 +1339,21 @@ fn parse_pointer_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_type => {
+            gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     ty_goff = Some(o.to_unit_section_offset(&unit));
-                } else if let gimli::AttributeValue::DebugInfoRef(o) = attr.value() {
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
                     ty_goff = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
             }
-            gimli::constants::DW_AT_declaration => {
+            gim_con::DW_AT_declaration => {
                 skip_entry(cursor)?;
                 return Ok(());
             }
@@ -1324,7 +1380,6 @@ fn parse_pointer_type(
             } else {
                 break;
             }
-
         }
     }
 
@@ -1343,17 +1398,17 @@ pub struct Union {
     pub alignment: u64,
     pub template_type_parameters: Vec<TemplateTypeParameter>,
     pub members: Vec<Member>,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 fn parse_union_type(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_union_type);
+    assert!(entry.tag() == gim_con::DW_TAG_union_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut name = None;
@@ -1363,16 +1418,16 @@ fn parse_union_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_name => {
+            gim_con::DW_AT_name => {
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
-            gimli::constants::DW_AT_byte_size => {
+            gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_alignment => {
+            gim_con::DW_AT_alignment => {
                 alignment = Some(attr.value().udata_value().unwrap());
             }
-            gimli::constants::DW_AT_declaration => {
+            gim_con::DW_AT_declaration => {
                 skip_entry(cursor)?;
                 return Ok(());
             }
@@ -1389,15 +1444,15 @@ fn parse_union_type(
             while let Some(()) = cursor.next_entry()? {
                 if let Some(child) = cursor.current() {
                     match child.tag() {
-                        gimli::constants::DW_TAG_template_type_parameter => {
+                        gim_con::DW_TAG_template_type_parameter => {
                             template_type_parameters.push(
-                                parse_template_type_parameter(dwarf, unit, cursor)?
+                                parse_template_type_parameter(
+                                    dwarf, unit, cursor,
+                                )?,
                             );
                         }
-                        gimli::constants::DW_TAG_member => {
-                            members.push(
-                                parse_member(dwarf, unit, cursor)?
-                            );
+                        gim_con::DW_TAG_member => {
+                            members.push(parse_member(dwarf, unit, cursor)?);
                         }
                         _ => {
                             skip_entry(cursor)?;
@@ -1428,17 +1483,17 @@ fn parse_union_type(
 pub struct Subroutine {
     pub return_ty_goff: Option<gimli::UnitSectionOffset>,
     pub formal_parameters: Vec<gimli::UnitSectionOffset>,
-    pub offset: gimli::UnitSectionOffset<usize>,
+    pub offset: gimli::UnitSectionOffset,
 }
 
 fn parse_subroutine_type(
-    dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
     builder: &mut TypesBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_subroutine_type);
+    assert!(entry.tag() == gim_con::DW_TAG_subroutine_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut return_ty_goff = None;
@@ -1446,10 +1501,12 @@ fn parse_subroutine_type(
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_type => {
+            gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     return_ty_goff = Some(o.to_unit_section_offset(&unit));
-                } else if let gimli::AttributeValue::DebugInfoRef(o) = attr.value() {
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
                     return_ty_goff = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
@@ -1465,10 +1522,9 @@ fn parse_subroutine_type(
         while let Some(()) = cursor.next_entry()? {
             if let Some(child) = cursor.current() {
                 match child.tag() {
-                    gimli::constants::DW_TAG_formal_parameter => {
-                        formal_parameters.push(
-                            parse_formal_parameter(dwarf, unit, cursor)?
-                        );
+                    gim_con::DW_TAG_formal_parameter => {
+                        formal_parameters
+                            .push(parse_formal_parameter(dwarf, unit, cursor)?);
                     }
                     _ => {
                         skip_entry(cursor)?;
@@ -1489,22 +1545,24 @@ fn parse_subroutine_type(
 }
 
 fn parse_formal_parameter(
-    _dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    unit: &gimli::Unit<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    _dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<gimli::UnitSectionOffset, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
-    assert!(entry.tag() == gimli::constants::DW_TAG_formal_parameter);
+    assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
 
     let mut ty_goff = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
-            gimli::constants::DW_AT_type => {
+            gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
                     ty_goff = Some(o.to_unit_section_offset(&unit));
-                } else if let gimli::AttributeValue::DebugInfoRef(o) = attr.value() {
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
                     ty_goff = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
@@ -1519,10 +1577,9 @@ fn parse_formal_parameter(
     Ok(ty_goff)
 }
 
-
 fn get_attr_string<'a>(
-    dwarf: &'a gimli::Dwarf<gimli::EndianSlice<gimli::RunTimeEndian>>,
-    attrval: gimli::AttributeValue<gimli::EndianSlice<gimli::RunTimeEndian>>,
+    dwarf: &'a gimli::Dwarf<RtSlice<'_>>,
+    attrval: gimli::AttributeValue<RtSlice<'_>>,
 ) -> Result<Cow<'a, str>, Box<dyn std::error::Error>> {
     match attrval {
         gimli::AttributeValue::DebugStrRef(offset) => {
@@ -1535,24 +1592,24 @@ fn get_attr_string<'a>(
         gimli::AttributeValue::String(data) => {
             Ok(data.to_string_lossy().into_owned().into()) // TODO hack
         }
-        _ => {
-            Err(format!("expected string, got: {:?}", attrval).into())
-        }
+        _ => Err(format!("expected string, got: {:?}", attrval).into()),
     }
 }
 
 fn skip_entry(
-    cursor: &mut gimli::EntriesCursor<'_, '_, gimli::EndianSlice<gimli::RunTimeEndian>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
 
     match entry.tag() {
-        gimli::constants::DW_TAG_structure_type => {
-            eprintln!("WARN: structure skipped");
-        },
-        gimli::constants::DW_TAG_enumeration_type => {
-            eprintln!("WARN: enumeration skipped");
-        },
+        gim_con::DW_TAG_structure_type => {
+            eprintln!("WARN: structure skipped: offset={:x?}",
+                entry.offset());
+        }
+        gim_con::DW_TAG_enumeration_type => {
+            eprintln!("WARN: enumeration skipped: offset={:x?}",
+                entry.offset());
+        }
         _ => (),
     }
 
