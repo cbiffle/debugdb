@@ -200,6 +200,73 @@ impl Types {
             .find(move |row| row.pc_range.contains(&pc))
     }
 
+    /// Computes the static stack slice implied by a PC value.
+    ///
+    /// For simple cases of subroutines without inlined code, the stack slice
+    /// contains a single entry describing the subroutine and the line number
+    /// within it corresponding to the PC.
+    ///
+    /// For more complex cases involving inlines, possibly multiple layers of
+    /// inlines, the stack slice will be deeper. In this case, the last element
+    /// of the returned vec is the _innermost_ inline, and the first element is
+    /// the enclosing (non-inlined) subprogram.
+    pub fn static_stack_for_pc(
+        &self,
+        pc: u64,
+    ) -> Result<Vec<PcInfo>, Box<dyn std::error::Error>> {
+        // Find subprogram containing PC.
+        let (pid, subp) = self.subprograms()
+            .find(|(_, subp)| subp.pc_range
+                .as_ref()
+                .map(|r| r.contains(&pc))
+                .unwrap_or(false))
+            .ok_or("enclosing subprogram not found")?;
+
+        let mut frag = vec![];
+
+        // Follow inlined subroutine tree to the tip, recording call info at
+        // each step.
+        let mut enclosing_prog = pid;
+        let mut inlines = Some(&subp.inlines);
+        'inline_loop:
+            while let Some(inl) = inlines.take() {
+                for inlsub in inl {
+                    for pcr in &inlsub.pc_ranges {
+                        if pcr.begin <= pc && pc < pcr.end {
+                            // We're in this one.
+                            if let Some(file) = &inlsub.call_coord.file {
+                                frag.push(PcInfo {
+                                    subprogram: enclosing_prog,
+                                    file: file.clone(),
+                                    line: inlsub.call_coord.line,
+                                    column: inlsub.call_coord.column,
+                                });
+
+                                enclosing_prog = ProgramId(
+                                    inlsub.abstract_origin
+                                    .expect("inlined sub w/o abstract_origin")
+                                );
+                                inlines = Some(&inlsub.inlines);
+                                continue 'inline_loop;
+                            }
+                        }
+                    }
+                }
+            }
+
+        // Finally, find the innermost record from the line number info.
+        if let Some(row) = self.lookup_line_row(pc) {
+            frag.push(PcInfo {
+                subprogram: enclosing_prog,
+                file: row.file.clone(),
+                line: row.line.map(|x| x.get() as u32),
+                column: row.column.map(|x| x.get() as u32),
+            });
+        }
+
+        Ok(frag)
+    }
+
     /// Looks up `key` in `index`, and then transforms the result by (1) copying
     /// the goffs and (2) attaching the associated `Type` to each item.
     fn consult_index<'d, K, Q>(
@@ -2275,4 +2342,11 @@ pub struct LineNumberRow {
     pub file: String,
     pub line: Option<NonZeroU64>,
     pub column: Option<NonZeroU64>,
+}
+
+pub struct PcInfo {
+    pub subprogram: ProgramId,
+    pub file: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
 }

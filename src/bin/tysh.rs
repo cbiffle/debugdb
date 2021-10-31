@@ -115,6 +115,7 @@ static COMMANDS: &[(&str, Command, &str)] = &[
     ("sizeof", cmd_sizeof, "print size of type in bytes"),
     ("alignof", cmd_alignof, "print alignment of type in bytes"),
     ("addr2line", cmd_addr2line, "look up line number information"),
+    ("addr2stack", cmd_addr2stack, "display inlined stack frames"),
 ];
 
 fn cmd_list(
@@ -594,5 +595,58 @@ fn cmd_addr2line(db: &dwarfldr::Types, args: &str) {
         println!();
     } else {
         println!("no line number information available for address");
+    }
+}
+
+fn cmd_addr2stack(db: &dwarfldr::Types, args: &str) {
+    let addr = if args.starts_with("0x") {
+        if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
+            a
+        } else {
+            println!("can't parse {} as an address", args);
+            return;
+        }
+    } else if let Ok(a) = args.parse::<u64>() {
+        a
+    } else {
+        println!("can't parse {} as an address", args);
+        return;
+    };
+
+    let bold = ansi_term::Style::new().bold();
+    let dim = ansi_term::Style::new().dimmed();
+
+    match db.static_stack_for_pc(addr) {
+        Ok(trc) => {
+            println!("Static stack trace fragment for address 0x{:x}", addr);
+            println!("(innermost / most recent first)");
+            for (i, record) in trc.iter().rev().enumerate() {
+                let subp = db.subprogram_by_id(record.subprogram).unwrap();
+
+                print!("{:4}   ", i);
+                if let Some(n) = &subp.name {
+                    println!("{}", bold.paint(n));
+                } else {
+                    println!("{}", bold.paint("<unknown-subprogram>"));
+                }
+                print!("{}", dim.prefix());
+                print!("    {}:", record.file);
+                if let Some(line) = record.line {
+                    print!("{}:", line);
+                } else {
+                    print!("?:");
+                }
+                if let Some(col) = record.column {
+                    print!("{}", col);
+                } else {
+                    print!("?");
+                }
+                print!("{}", dim.suffix());
+                println!();
+            }
+        }
+        Err(e) => {
+            println!("failed: {}", e);
+        }
     }
 }
