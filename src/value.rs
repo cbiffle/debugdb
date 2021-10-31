@@ -1,5 +1,5 @@
 use crate::load::{choose_variant, load_unsigned, Load};
-use crate::{Encoding, Type, Types, TypeId};
+use crate::{Encoding, Type, DebugDb, TypeId};
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
@@ -28,7 +28,7 @@ impl Load for Value {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         match ty {
@@ -64,7 +64,7 @@ impl Load for Base {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        _world: &Types,
+        _world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Base(b) = ty {
@@ -88,7 +88,7 @@ impl Load for Struct {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Struct(s) = ty {
@@ -124,7 +124,7 @@ impl Load for Enum {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Enum(s) = ty {
@@ -156,7 +156,7 @@ impl Load for CEnum {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::CEnum(s) = ty {
@@ -193,7 +193,7 @@ impl Load for Pointer {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // TODO support pointer sizes

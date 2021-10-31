@@ -1,4 +1,4 @@
-use crate::{Encoding, Enum, Type, Types, Variant, VariantShape};
+use crate::{Encoding, Enum, Type, DebugDb, Variant, VariantShape};
 use gimli::Reader;
 use std::convert::TryFrom;
 
@@ -6,7 +6,7 @@ pub trait Load: Sized {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>>;
 }
@@ -15,7 +15,7 @@ impl<A: Load, B: Load> Load for (A, B) {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Struct(s) = ty {
@@ -51,7 +51,7 @@ impl Load for u8 {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        _world: &Types,
+        _world: &DebugDb,
         ty: &Type,
     ) -> Result<u8, Box<dyn std::error::Error>> {
         if let Type::Base(b) = ty {
@@ -72,7 +72,7 @@ impl Load for i8 {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        _world: &Types,
+        _world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Base(b) = ty {
@@ -95,7 +95,7 @@ macro_rules! base_impl {
             fn from_buffer(
                 buffer: &[u8],
                 addr: usize,
-                world: &Types,
+                world: &DebugDb,
                 ty: &Type,
             ) -> Result<Self, Box<dyn std::error::Error>> {
                 if let Type::Base(b) = ty {
@@ -129,7 +129,7 @@ impl<T: Load> Load for Vec<T> {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Array(s) = ty {
@@ -172,7 +172,7 @@ impl<T: Load> Load for Option<T> {
     fn from_buffer(
         buffer: &[u8],
         addr: usize,
-        world: &Types,
+        world: &DebugDb,
         ty: &Type,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Enum(s) = ty {
@@ -231,7 +231,7 @@ impl<T: Load> Load for Option<T> {
 pub(crate) fn choose_variant<'e>(
     buffer: &[u8],
     addr: usize,
-    world: &'e Types,
+    world: &'e DebugDb,
     e: &'e Enum,
 ) -> Result<&'e Variant, Box<dyn std::error::Error>> {
     match &e.variant_part.shape {
@@ -275,7 +275,7 @@ pub(crate) fn load_unsigned(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{TypeId, TypesBuilder};
+    use crate::{TypeId, DebugDbBuilder};
 
     #[derive(Debug, Default)]
     struct OffsetMaker {
@@ -291,7 +291,7 @@ mod test {
     }
 
     fn make_option_u16(
-        builder: &mut TypesBuilder,
+        builder: &mut DebugDbBuilder,
         om: &mut OffsetMaker,
     ) -> TypeId {
         let u16_goff = om.next();
@@ -387,7 +387,7 @@ mod test {
     fn load_option_u16() {
         let mut om = OffsetMaker::default();
         let mut builder =
-            TypesBuilder::new(gimli::RunTimeEndian::Little, false);
+            DebugDbBuilder::new(gimli::RunTimeEndian::Little, false);
 
         let option_goff = make_option_u16(&mut builder, &mut om);
 
@@ -410,7 +410,7 @@ mod test {
     fn load_u8_array() {
         let mut om = OffsetMaker::default();
         let mut builder =
-            TypesBuilder::new(gimli::RunTimeEndian::Little, false);
+            DebugDbBuilder::new(gimli::RunTimeEndian::Little, false);
 
         let u8_goff = om.next();
         builder.record_type(crate::Base {

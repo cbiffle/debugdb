@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 
-use dwarfldr::{Type, Variant, VariantShape};
+use debugdb::{Type, Variant, VariantShape};
 
 #[derive(Debug, StructOpt)]
 struct Sketch {
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn dump_file<'a>(
     object: &'a object::File,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let everything = dwarfldr::parse_file(object)?;
+    let everything = debugdb::parse_file(object)?;
 
     println!("-- stuff parsed --");
     for (goff, e) in everything.types() {
@@ -308,7 +308,7 @@ fn dump_file<'a>(
     Ok(())
 }
 
-fn print_inlined_subroutine(everything: &dwarfldr::Types, is: &dwarfldr::InlinedSubroutine, level: usize) {
+fn print_inlined_subroutine(everything: &debugdb::DebugDb, is: &debugdb::InlinedSubroutine, level: usize) {
     let indent = 2 * level;
     println!("{:indent$}- inlined subroutine:", "", indent = indent);
     if let Some(ao) = is.abstract_origin {

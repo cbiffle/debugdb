@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 
-use dwarfldr::{Type, Variant, VariantShape, Encoding, TypeId};
+use debugdb::{Type, Variant, VariantShape, Encoding, TypeId};
 
 #[derive(Debug, StructOpt)]
 struct TySh {
@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let buffer = std::fs::read(args.filename)?;
     let object = object::File::parse(&*buffer)?;
-    let everything = dwarfldr::parse_file(&object)?;
+    let everything = debugdb::parse_file(&object)?;
 
     println!("Loaded; {} types found in program.", everything.type_count());
     println!("To quit: ^D or exit");
@@ -81,7 +81,7 @@ impl std::fmt::Display for Goff {
     }
 }
 
-struct NamedGoff<'a>(&'a dwarfldr::Types, TypeId);
+struct NamedGoff<'a>(&'a debugdb::DebugDb, TypeId);
 
 impl std::fmt::Display for NamedGoff<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -106,7 +106,7 @@ impl std::fmt::Display for NamedGoff<'_> {
     }
 }
 
-type Command = fn(&dwarfldr::Types, &str);
+type Command = fn(&debugdb::DebugDb, &str);
 
 static COMMANDS: &[(&str, Command, &str)] = &[
     ("list", cmd_list, "print names of ALL types, or types containing a string"),
@@ -119,7 +119,7 @@ static COMMANDS: &[(&str, Command, &str)] = &[
 ];
 
 fn cmd_list(
-    db: &dwarfldr::Types,
+    db: &debugdb::DebugDb,
     args: &str,
 ) {
     for (goff, _) in db.types() {
@@ -170,9 +170,9 @@ enum ParsedTypeName<'a> {
 }
 
 fn simple_query_cmd(
-    db: &dwarfldr::Types,
+    db: &debugdb::DebugDb,
     args: &str,
-    q: fn(&dwarfldr::Types, &dwarfldr::Type),
+    q: fn(&debugdb::DebugDb, &debugdb::Type),
 ) {
     let type_name = args.trim();
     let types: Vec<_> = match parse_type_name(type_name) {
@@ -216,7 +216,7 @@ fn simple_query_cmd(
     }
 }
 
-fn cmd_info(db: &dwarfldr::Types, args: &str) {
+fn cmd_info(db: &debugdb::DebugDb, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         match t {
             Type::Base(s) => {
@@ -292,10 +292,10 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                 }
 
                 match &s.variant_part.shape {
-                    dwarfldr::VariantShape::Zero => {
+                    debugdb::VariantShape::Zero => {
                         println!("- empty (uninhabited) enum");
                     }
-                    dwarfldr::VariantShape::One(v) => {
+                    debugdb::VariantShape::One(v) => {
                         println!("- single variant enum w/o discriminator");
                         println!("  - content type: {}", NamedGoff(db, v.member.type_id));
                         println!("  - offset: {} bytes", v.member.location);
@@ -306,7 +306,7 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                             println!("  - not artificial, oddly");
                         }
                     }
-                    dwarfldr::VariantShape::Many { member, variants, .. }=> {
+                    debugdb::VariantShape::Many { member, variants, .. }=> {
                         if let Some(dname) = db.type_name(member.type_id) {
                             println!("- {} variants discriminated by {} at offset {}", variants.len(), dname, member.location);
                         } else {
@@ -359,7 +359,7 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
     })
 }
 
-fn cmd_sizeof(db: &dwarfldr::Types, args: &str) {
+fn cmd_sizeof(db: &debugdb::DebugDb, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         if let Some(sz) = t.byte_size(db) {
             println!("{} bytes", sz);
@@ -369,7 +369,7 @@ fn cmd_sizeof(db: &dwarfldr::Types, args: &str) {
     })
 }
 
-fn cmd_alignof(db: &dwarfldr::Types, args: &str) {
+fn cmd_alignof(db: &debugdb::DebugDb, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         if let Some(sz) = t.alignment(db) {
             println!("align to {} bytes", sz);
@@ -379,7 +379,7 @@ fn cmd_alignof(db: &dwarfldr::Types, args: &str) {
     })
 }
 
-fn cmd_def(db: &dwarfldr::Types, args: &str) {
+fn cmd_def(db: &debugdb::DebugDb, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         println!();
         match t {
@@ -464,8 +464,8 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
                 println!(" {{");
 
                 match &s.variant_part.shape {
-                    dwarfldr::VariantShape::Zero => (),
-                    dwarfldr::VariantShape::One(var) => {
+                    debugdb::VariantShape::Zero => (),
+                    debugdb::VariantShape::One(var) => {
                         if let Some(name) = &var.member.name {
                             print!("    {}", name);
                         } else {
@@ -498,7 +498,7 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
 
                         println!(",");
                     }
-                    dwarfldr::VariantShape::Many { variants, .. }=> {
+                    debugdb::VariantShape::Many { variants, .. }=> {
                         for var in variants.values() {
                             if let Some(name) = &var.member.name {
                                 print!("    {}", name);
@@ -565,7 +565,7 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
     })
 }
 
-fn cmd_addr2line(db: &dwarfldr::Types, args: &str) {
+fn cmd_addr2line(db: &debugdb::DebugDb, args: &str) {
     let addr = if args.starts_with("0x") {
         if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
             a
@@ -598,7 +598,7 @@ fn cmd_addr2line(db: &dwarfldr::Types, args: &str) {
     }
 }
 
-fn cmd_addr2stack(db: &dwarfldr::Types, args: &str) {
+fn cmd_addr2stack(db: &debugdb::DebugDb, args: &str) {
     let addr = if args.starts_with("0x") {
         if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
             a

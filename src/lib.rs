@@ -13,6 +13,11 @@ use gimli::constants as gim_con;
 type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
 type BTreeIndex<I, K> = BTreeMap<K, BTreeSet<I>>;
 
+/// Identifies a specific type within a program, using its offset within the
+/// debug section(s).
+///
+/// Sometimes types appear more than once in debug info. In that case, each type
+/// will have a distinct `TypeId`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct TypeId(pub gimli::UnitSectionOffset);
 
@@ -22,16 +27,23 @@ impl From<gimli::UnitSectionOffset> for TypeId {
     }
 }
 
+/// Identifies a subprogram within a program -- a function or subroutine.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct ProgramId(pub gimli::UnitSectionOffset);
 
-/// A database of types extracted from the debug info of a program.
+impl From<gimli::UnitSectionOffset> for ProgramId {
+    fn from(x: gimli::UnitSectionOffset) -> Self {
+        Self(x)
+    }
+}
+
+/// A database of information extracted from the debug info of a program.
 ///
-/// This is primarily focused on correctly representing Rust types, but it can
-/// represent a large subset of C types as a side effect -- currently only
+/// This is primarily focused on correctly representing Rust programs, but it
+/// can represent a large subset of C types as a side effect -- currently only
 /// unnamed types present a problem. This could be fixed.
 #[derive(Clone, Debug, Default)]
-pub struct Types {
+pub struct DebugDb {
     /// Endianness of the target system.
     endian: gimli::RunTimeEndian,
     /// Pointer width of the target system. Currently only 32 and 64 are
@@ -79,7 +91,7 @@ pub struct Types {
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
 }
 
-impl Types {
+impl DebugDb {
     /// Gets the endianness of the program.
     pub fn endian(&self) -> gimli::RunTimeEndian {
         self.endian
@@ -94,12 +106,13 @@ impl Types {
         }
     }
 
+    /// Returns the number of types in the debug info.
     pub fn type_count(&self) -> usize {
         self.types.len()
     }
 
-    /// Produces an iterator over all types defined in the program, together
-    /// with their unique section offsets.
+    /// Produces an iterator over all types defined in the debug info, together
+    /// with their IDs.
     pub fn types(
         &self,
     ) -> impl Iterator<Item = (TypeId, &Type)> + '_ {
@@ -120,8 +133,8 @@ impl Types {
 
     /// Shorthand for looking up the name of a type.
     ///
-    /// If the offset was found inside another type in `self`, our consistency
-    /// rules guarantee that this will return `Some`.
+    /// Note that not all types have names, so this may return `None` even if
+    /// the type exists.
     pub fn type_name(
         &self,
         id: TypeId,
@@ -134,6 +147,9 @@ impl Types {
     ///
     /// Names are matched in their entirety, e.g. the name `"Option"` does not
     /// match a type `"core::option::Option<u16>"`.
+    ///
+    /// Not all types are in the type name index. In particular, array types and
+    /// subroutine types.
     pub fn types_by_name(
         &self,
         name: &str,
@@ -287,13 +303,13 @@ impl Types {
 }
 
 /// Builder that accumulates the type information from a program and produces a
-/// `Types` database.
+/// `DebugDb` database.
 ///
 /// This is primarily intended as a write-only sink for type information. After
 /// everything is stuffed in, `build()` will validate the information, generate
-/// indices, and produce a `Types` database.
+/// indices, and produce a `DebugDb` database.
 #[derive(Clone, Debug)]
-pub struct TypesBuilder {
+pub struct DebugDbBuilder {
     path: Vec<String>,
     endian: gimli::RunTimeEndian,
     is_64: bool,
@@ -303,8 +319,8 @@ pub struct TypesBuilder {
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
 }
 
-impl TypesBuilder {
-    /// Creates a new `TypesBuilder` for information from a program with the
+impl DebugDbBuilder {
+    /// Creates a new `DebugDbBuilder` for information from a program with the
     /// given endianness and pointer width.
     pub fn new(endian: gimli::RunTimeEndian, is_64: bool) -> Self {
         Self {
@@ -317,7 +333,7 @@ impl TypesBuilder {
         }
     }
 
-    pub fn build(self) -> Result<Types, Box<dyn std::error::Error>> {
+    pub fn build(self) -> Result<DebugDb, Box<dyn std::error::Error>> {
         let check = |id| -> Result<(), Box<dyn std::error::Error>> {
             if self.types.contains_key(&id) {
                 Ok(())
@@ -432,7 +448,7 @@ impl TypesBuilder {
                 check_inl(inl)?;
             }
         }
-        Ok(Types {
+        Ok(DebugDb {
             endian: self.endian,
             types: self.types,
             is_64: self.is_64,
@@ -515,7 +531,7 @@ where
 /// Parses type information from an `object::File`.
 pub fn parse_file<'a>(
     object: &'a object::File,
-) -> Result<Types, Box<dyn std::error::Error>> {
+) -> Result<DebugDb, Box<dyn std::error::Error>> {
     let endian = if object.is_little_endian() {
         gimli::RunTimeEndian::Little
     } else {
@@ -538,7 +554,7 @@ pub fn parse_file<'a>(
         dwarf_cow.borrow(|section| gimli::EndianSlice::new(section, endian));
 
     let mut iter = dwarf.units();
-    let mut builder = TypesBuilder::new(endian, object.is_64());
+    let mut builder = DebugDbBuilder::new(endian, object.is_64());
 
     while let Some(header) = iter.next()? {
         let unit = dwarf.unit(header)?;
@@ -605,7 +621,7 @@ fn handle_nested_types(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(child) = cursor.current() {
         match child.tag() {
@@ -649,7 +665,7 @@ fn parse_entry(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
 
@@ -675,7 +691,7 @@ fn parse_namespace(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_namespace);
@@ -732,7 +748,7 @@ fn parse_base_type(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_base_type);
@@ -832,7 +848,7 @@ impl Type {
         }
     }
 
-    pub fn alignment(&self, world: &Types) -> Option<u64> {
+    pub fn alignment(&self, world: &DebugDb) -> Option<u64> {
         match self {
             Self::Struct(s) => s.alignment,
             Self::Enum(s) => s.alignment,
@@ -852,7 +868,7 @@ impl Type {
         }
     }
 
-    pub fn byte_size(&self, world: &Types) -> Option<u64> {
+    pub fn byte_size(&self, world: &DebugDb) -> Option<u64> {
         match self {
             Self::Struct(s) => Some(s.byte_size),
             Self::Enum(s) => Some(s.byte_size),
@@ -869,7 +885,7 @@ impl Type {
         }
     }
 
-    pub fn name(&self, world: &Types) -> Cow<'_, str> {
+    pub fn name(&self, world: &DebugDb) -> Cow<'_, str> {
         match self {
             Self::Struct(s) => (&s.name).into(),
             Self::Enum(s) => (&s.name).into(),
@@ -946,7 +962,7 @@ fn parse_structure_type(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_structure_type);
@@ -1361,7 +1377,7 @@ fn parse_enumeration_type(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_enumeration_type);
@@ -1483,7 +1499,7 @@ fn parse_array_type(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_array_type);
@@ -1610,7 +1626,7 @@ fn parse_pointer_type(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_pointer_type);
@@ -1687,7 +1703,7 @@ fn parse_union_type(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_union_type);
@@ -1772,7 +1788,7 @@ fn parse_subroutine_type(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_subroutine_type);
@@ -1912,7 +1928,7 @@ fn parse_subprogram(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-    builder: &mut TypesBuilder,
+    builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_subprogram);
