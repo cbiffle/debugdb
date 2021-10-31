@@ -135,7 +135,7 @@ fn dump_file<'a>(
                         .unwrap_or("???".into());
                     println!("        type: {:?} ({:x?}),", tyname, m.type_id);
                 };
-                match &s.variant_part.shape {
+                match &s.shape {
                     VariantShape::Many {
                         member, variants, ..
                     } => {

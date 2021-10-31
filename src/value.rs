@@ -1,3 +1,8 @@
+//! Abstract, dynamic, JSON-like representation of Rust values.
+//!
+//! This can be read from a program image using `Load` even if the program doing
+//! the reading doesn't know the type shape in advance.
+
 use crate::load::{choose_variant, load_unsigned, Load};
 use crate::{Encoding, Type, DebugDb, TypeId};
 use std::collections::BTreeMap;

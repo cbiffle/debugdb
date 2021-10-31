@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 
-use debugdb::{Type, Variant, VariantShape, Encoding, TypeId};
+use debugdb::{Type, Encoding, TypeId};
 
 #[derive(Debug, StructOpt)]
 struct TySh {
@@ -291,7 +291,7 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                     }
                 }
 
-                match &s.variant_part.shape {
+                match &s.shape {
                     debugdb::VariantShape::Zero => {
                         println!("- empty (uninhabited) enum");
                     }
@@ -463,7 +463,7 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
                 }
                 println!(" {{");
 
-                match &s.variant_part.shape {
+                match &s.shape {
                     debugdb::VariantShape::Zero => (),
                     debugdb::VariantShape::One(var) => {
                         if let Some(name) = &var.member.name {

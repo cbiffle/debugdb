@@ -1,3 +1,7 @@
+//! Support for extracting values from a program image, processing them using
+//! debug information, and turning them into Rust values in the observing
+//! program.
+
 use crate::{Encoding, Enum, Type, DebugDb, Variant, VariantShape};
 use gimli::Reader;
 use std::convert::TryFrom;
@@ -177,7 +181,7 @@ impl<T: Load> Load for Option<T> {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Enum(s) = ty {
             // Option-like enums have two variants.
-            if let VariantShape::Many { variants, .. } = &s.variant_part.shape {
+            if let VariantShape::Many { variants, .. } = &s.shape {
                 if variants.len() != 2 {
                     return Err("wrong enum shape for Option".into());
                 }
@@ -234,7 +238,7 @@ pub(crate) fn choose_variant<'e>(
     world: &'e DebugDb,
     e: &'e Enum,
 ) -> Result<&'e Variant, Box<dyn std::error::Error>> {
-    match &e.variant_part.shape {
+    match &e.shape {
         VariantShape::Zero => {
             return Err("load of uninhabited enum".into());
         }
@@ -339,40 +343,37 @@ mod test {
             byte_size: 4,
             alignment: Some(2),
             template_type_parameters: vec![],
-            variant_part: crate::VariantPart {
-                offset: om.next(),
-                shape: VariantShape::Many {
-                    discr: om.next(),
-                    member: crate::Member {
-                        name: None,
-                        artificial: true,
-                        type_id: u16_goff.into(),
-                        alignment: Some(2),
-                        location: 0,
+            shape: VariantShape::Many {
+                discr: om.next(),
+                member: crate::Member {
+                    name: None,
+                    artificial: true,
+                    type_id: u16_goff.into(),
+                    alignment: Some(2),
+                    location: 0,
+                    offset: om.next(),
+                },
+                variants: indexmap::indexmap! {
+                    Some(0) => crate::Variant {
                         offset: om.next(),
-                    },
-                    variants: indexmap::indexmap! {
-                        Some(0) => crate::Variant {
+                        member: crate::Member {
+                            name: Some("None".to_string()),
+                            artificial: false,
+                            alignment: Some(2),
+                            location: 0,
+                            type_id: none_goff.into(),
                             offset: om.next(),
-                            member: crate::Member {
-                                name: Some("None".to_string()),
-                                artificial: false,
-                                alignment: Some(2),
-                                location: 0,
-                                type_id: none_goff.into(),
-                                offset: om.next(),
-                            },
                         },
-                        Some(1) => crate::Variant {
+                    },
+                    Some(1) => crate::Variant {
+                        offset: om.next(),
+                        member: crate::Member {
+                            name: Some("Some".to_string()),
+                            artificial: false,
+                            alignment: Some(2),
+                            location: 0,
+                            type_id: some_goff.into(),
                             offset: om.next(),
-                            member: crate::Member {
-                                name: Some("Some".to_string()),
-                                artificial: false,
-                                alignment: Some(2),
-                                location: 0,
-                                type_id: some_goff.into(),
-                                offset: om.next(),
-                            },
                         },
                     },
                 },
