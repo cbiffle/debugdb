@@ -224,5 +224,136 @@ fn dump_file<'a>(
             }
         }
     }
+
+    println!("--- subprograms ---");
+    for (goff, sp) in everything.subprograms() {
+        println!("{:x?} = {:?}", goff, sp.name);
+        if let Some(ln) = &sp.linkage_name {
+            println!("- linkage name: {}", ln);
+        }
+        if let Some(pcr) = &sp.pc_range {
+            println!("- PC range: {:#x?}", pcr);
+        }
+        if let Some(ao) = sp.abstract_origin {
+            println!("- abstract origin: {:x?}", ao);
+        }
+
+        println!("- decl: {}:{}:{}",
+            sp.decl_coord.file.as_deref().unwrap_or("????"),
+            sp.decl_coord.line.unwrap_or(0),
+            sp.decl_coord.column.unwrap_or(0),
+            );
+        if let Some(rt) = sp.return_ty_goff {
+            println!("- returns: {}",
+                everything.name_from_goff(rt)
+                .unwrap_or("???".into()));
+        }
+        if sp.noreturn {
+            println!("- NORETURN");
+        }
+        if !sp.template_type_parameters.is_empty() {
+            println!("- type parameters:");
+            for ttp in &sp.template_type_parameters {
+                println!("  - {} = {:x?}", ttp.name, ttp.ty_goff);
+            }
+        }
+        if !sp.formal_parameters.is_empty() {
+            println!("- formal parameters:");
+            for p in &sp.formal_parameters {
+                if let Some(n) = &p.name {
+                    println!("  - {}:", n);
+                } else {
+                    println!("  - <anon>:");
+                }
+                println!("    - decl: {}:{}:{}",
+                    p.decl_coord.file.as_deref().unwrap_or("????"),
+                    p.decl_coord.line.unwrap_or(0),
+                    p.decl_coord.column.unwrap_or(0),
+                );
+                if let Some(t) = p.ty_goff {
+                    println!("    - type: {}",
+                        everything.name_from_goff(t)
+                        .unwrap_or("???".into()));
+                }
+                if let Some(ao) = p.abstract_origin {
+                    println!("    - abstract origin: {:x?}", ao);
+                }
+            }
+        }
+        if !sp.inlines.is_empty() {
+            for is in &sp.inlines {
+                print_inlined_subroutine(&everything, is, 0);
+            }
+        }
+
+        println!();
+    }
+
+    println!("--- line number table ---");
+    for (_addr, rows) in everything.line_table_rows() {
+        for row in rows {
+            println!("Range: {:#x?}{}",
+                row.pc_range,
+                if row.pc_range.is_empty() {
+                    " (empty!)"
+                } else {
+                    ""
+                });
+            println!("- file: {:?}", row.file);
+            println!("- line: {:?}", row.line);
+            println!("- col:  {:?}", row.column);
+        }
+    }
+
     Ok(())
+}
+
+fn print_inlined_subroutine(everything: &dwarfldr::Types, is: &dwarfldr::InlinedSubroutine, level: usize) {
+    let indent = 2 * level;
+    println!("{:indent$}- inlined subroutine:", "", indent = indent);
+    if let Some(ao) = is.abstract_origin {
+        println!("{:indent$}  - abstract origin: {:x?}", "", ao, indent = indent);
+    }
+    println!("{:indent$}  - call: {}:{}:{}",
+        "",
+        is.call_coord.file.as_deref().unwrap_or("????"),
+        is.call_coord.line.unwrap_or(0),
+        is.call_coord.column.unwrap_or(0),
+        indent = indent
+    );
+    println!("{:indent$}  - PC ranges:", "", indent = indent);
+    for r in &is.pc_ranges {
+        println!("{:indent$}    - {:#x}..{:#x}", "", r.begin, r.end, indent = indent);
+    }
+
+    if !is.formal_parameters.is_empty() {
+        println!("{:indent$}  - formal parameters:", "", indent = indent);
+        for p in &is.formal_parameters {
+            if let Some(n) = &p.name {
+                println!("{:indent$}    - {}:", "", n, indent = indent);
+            } else {
+                println!("{:indent$}    - <anon>:", "", indent = indent);
+            }
+            println!("{:indent$}      - decl: {}:{}:{}",
+                "",
+                p.decl_coord.file.as_deref().unwrap_or("????"),
+                p.decl_coord.line.unwrap_or(0),
+                p.decl_coord.column.unwrap_or(0),
+                indent = indent,
+            );
+            if let Some(t) = p.ty_goff {
+                println!("{:indent$}      - type: {}",
+                    "",
+                    everything.name_from_goff(t).unwrap_or("???".into()),
+                    indent = indent
+                );
+            }
+            if let Some(ao) = p.abstract_origin {
+                println!("{:indent$}      - abstract origin: {:x?}", "", ao, indent = indent);
+            }
+        }
+    }
+    for sub in &is.inlines {
+        print_inlined_subroutine(everything, sub, level + 1);
+    }
 }

@@ -5,11 +5,13 @@ use indexmap::IndexMap;
 use object::{Object, ObjectSection};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 
 use gimli::constants as gim_con;
 
 // Internal type abbreviations
 type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
+type BTreeIndex<K> = BTreeMap<K, BTreeSet<gimli::UnitSectionOffset>>;
 
 /// A database of types extracted from the debug info of a program.
 ///
@@ -39,7 +41,30 @@ pub struct Types {
     ///
     /// Invariant: all UnitSectionOffset values have corresponding entries in
     /// `types`.
-    type_name_index: BTreeMap<String, BTreeSet<gimli::UnitSectionOffset>>,
+    type_name_index: BTreeIndex<String>,
+
+    /// Index: array element type and size to location(s) in `types`. Since
+    /// arrays do not have names in DWARF, they can't be looked up in the
+    /// `type_name_index`.
+    array_index: BTreeIndex<(gimli::UnitSectionOffset, Option<u64>)>,
+
+    /// Index: subroutine argument and return types to location(s) in `types`.
+    /// Since subroutine types do not have names in DWARF, they can't be looked
+    /// up in the `type_name_index`.
+    ///
+    /// The specific structure here is a nested map: argument types -> return
+    /// type -> type goffs. This allows the first lookup to happen with a slice,
+    /// thanks to the `Borrow` trait, which would not be possible if the key
+    /// were instead a `(Vec<Goff>, Option<Goff>)`.
+    ///
+    /// Note that this is subroutine _types,_ not subprograms.
+    subroutine_index: BTreeMap<Vec<gimli::UnitSectionOffset>, BTreeIndex<Option<gimli::UnitSectionOffset>>>,
+
+    /// All subprograms, indexed by location in the debug section(s).
+    subprograms: BTreeMap<gimli::UnitSectionOffset, Subprogram>,
+
+    /// Mapping of text address to line number information.
+    line_table: BTreeMap<u64, Vec<LineNumberRow>>,
 }
 
 impl Types {
@@ -55,6 +80,10 @@ impl Types {
         } else {
             4
         }
+    }
+
+    pub fn type_count(&self) -> usize {
+        self.types.len()
     }
 
     /// Produces an iterator over all types defined in the program, together
@@ -98,8 +127,73 @@ impl Types {
         &self,
         name: &str,
     ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
-        self.type_name_index
-            .get(name)
+        self.consult_index(&self.type_name_index, name)
+    }
+
+    /// Consults the array index and returns an iterator over array types with a
+    /// particular shape.
+    pub fn array_types(
+        &self,
+        element: gimli::UnitSectionOffset,
+        count: Option<u64>,
+    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
+        self.consult_index(&self.array_index, &(element, count))
+    }
+
+    /// Consults the subroutine index and returns an iterator over subroutine
+    /// types with a particular shape.
+    ///
+    /// The return type is optional because, in both C and Rust, DWARF will omit
+    /// the return type for subroutines returning `void` / `()`. As a result,
+    /// looking up subroutines returning the `()` type will not produce results.
+    pub fn subroutine_types(
+        &self,
+        argument_tys: &[gimli::UnitSectionOffset],
+        return_ty: Option<gimli::UnitSectionOffset>,
+    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
+        self.subroutine_index
+            .get(argument_tys)
+            .into_iter()
+            .flat_map(move |index|
+                self.consult_index(index, &return_ty)
+            )
+    }
+
+    pub fn subprograms(
+        &self,
+    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Subprogram)> + '_ {
+        self.subprograms.iter().map(|(&goff, ty)| (goff, ty))
+    }
+
+    pub fn line_table_rows(
+        &self,
+    ) -> impl Iterator<Item = (u64, &[LineNumberRow])> + '_ {
+        self.line_table.iter().map(|(&a, row)| (a, &**row))
+    }
+
+    pub fn lookup_line_row(
+        &self,
+        pc: u64,
+    ) -> Option<&LineNumberRow> {
+        self.line_table.range(..=pc)
+            .rev()
+            .flat_map(|(_, rows)| rows)
+            .take_while(move |row| row.pc_range.end > pc)
+            .find(move |row| row.pc_range.contains(&pc))
+    }
+
+    /// Looks up `key` in `index`, and then transforms the result by (1) copying
+    /// the goffs and (2) attaching the associated `Type` to each item.
+    fn consult_index<'d, K, Q>(
+        &'d self,
+        index: &'d BTreeIndex<K>,
+        key: &Q,
+    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &'d Type)> + 'd
+        where K: std::borrow::Borrow<Q> + Ord,
+              Q: Ord + ?Sized,
+    {
+        index
+            .get(key)
             .into_iter()
             .flat_map(move |set| {
                 set.iter().map(move |&goff| (goff, &self.types[&goff]))
@@ -119,6 +213,9 @@ pub struct TypesBuilder {
     endian: gimli::RunTimeEndian,
     is_64: bool,
     types: BTreeMap<gimli::UnitSectionOffset, Type>,
+
+    subprograms: BTreeMap<gimli::UnitSectionOffset, Subprogram>,
+    line_table: BTreeMap<u64, Vec<LineNumberRow>>,
 }
 
 impl TypesBuilder {
@@ -130,6 +227,8 @@ impl TypesBuilder {
             path: vec![],
             is_64,
             types: BTreeMap::new(),
+            subprograms: BTreeMap::new(),
+            line_table: BTreeMap::new(),
         }
     }
 
@@ -201,8 +300,17 @@ impl TypesBuilder {
             }
         }
 
-        // Build type name index. We only index types with inherent names, i.e.
-        // not arrays or subroutines.
+        // Check that line number ranges meet our expectations.
+        for rows in self.line_table.values() {
+            let non_empty_count = rows.iter()
+                .filter(|row| !row.pc_range.is_empty())
+                .count();
+            if non_empty_count > 1 {
+                println!("Overlap at {:#x?}", rows);
+            }
+        }
+
+        // Build type name index.
         let type_name_index = index_by_key(&self.types, |_, t| match t {
             Type::Struct(s) => Some(s.name.clone()),
             Type::Enum(s) => Some(s.name.clone()),
@@ -212,11 +320,35 @@ impl TypesBuilder {
             Type::Pointer(s) => Some(s.name.clone()),
             _ => None,
         });
+        // Build array index.
+        let array_index = index_by_key(&self.types, |_, t| match t {
+            Type::Array(a) => Some((a.element_ty_goff, a.count)),
+            _ => None,
+        });
+        // Build subroutine index. This is more complex in shape than the other
+        // indices.
+        let subroutine_index = {
+            let mut ind = BTreeMap::<_, BTreeIndex<_>>::new();
+            for (k, v) in &self.types {
+                if let Type::Subroutine(s) = v {
+                    ind.entry(s.formal_parameters.clone())
+                        .or_default()
+                        .entry(s.return_ty_goff)
+                        .or_default()
+                        .insert(*k);
+                }
+            }
+            ind
+        };
         Ok(Types {
             endian: self.endian,
             types: self.types,
             is_64: self.is_64,
+            subprograms: self.subprograms,
+            line_table: self.line_table,
             type_name_index,
+            array_index,
+            subroutine_index,
         })
     }
 
@@ -227,6 +359,16 @@ impl TypesBuilder {
     pub fn record_type(&mut self, t: impl Into<Type>) {
         let t = t.into();
         self.types.insert(t.offset(), t);
+    }
+
+    pub fn record_subprogram(&mut self, t: Subprogram) {
+        self.subprograms.insert(t.offset, t);
+    }
+
+    pub fn record_line_table_row(&mut self, addr: u64, r: LineNumberRow) {
+        self.line_table.entry(addr)
+            .or_default()
+            .push(r)
     }
 
     fn format_path(&self, name: impl std::fmt::Display) -> String {
@@ -309,6 +451,50 @@ pub fn parse_file<'a>(
     while let Some(header) = iter.next()? {
         let unit = dwarf.unit(header)?;
 
+        if let Some(lp) = &unit.line_program {
+            let lp = lp.clone();
+            let mut rows = lp.rows();
+
+            let mut last_row: Option<LineNumberRow> = None;
+            while let Some((header, row)) = rows.next_row()? {
+                let file = if let Some(file) = row.file(header) {
+                    if let Some(directory) = file.directory(header) {
+                        format!(
+                            "{}/{}",
+                            dwarf.attr_string(&unit, directory)?.to_string_lossy(),
+                            dwarf
+                            .attr_string(&unit, file.path_name())?
+                            .to_string_lossy()
+                        ).into()
+                    } else {
+                        dwarf
+                            .attr_string(&unit, file.path_name())?
+                            .to_string_lossy()
+                    }
+                } else {
+                    "???".into()
+                };
+                if let Some(mut pending) = last_row.take() {
+                    pending.pc_range.end = row.address();
+                    builder.record_line_table_row(pending.pc_range.start, pending);
+                }
+
+                if !row.end_sequence() {
+                    last_row = Some(LineNumberRow {
+                        pc_range: row.address()..0,
+                        file: file.into_owned(),
+                        line: row.line(),
+                        column: match row.column() {
+                            gimli::ColumnType::Column(c) => Some(c),
+                            gimli::ColumnType::LeftEdge => None,
+                        },
+                    });
+                }
+            }
+            if last_row.is_some() {
+                eprintln!("WARN: line number program not terminated by end sequence");
+            }
+        }
         let mut entries = unit.entries();
         while let Some(()) = entries.next_entry()? {
             if entries.current().is_none() {
@@ -354,6 +540,9 @@ fn handle_nested_types(
             }
             gim_con::DW_TAG_namespace => {
                 parse_namespace(dwarf, unit, cursor, builder)?;
+            }
+            gim_con::DW_TAG_subprogram => {
+                parse_subprogram(dwarf, unit, cursor, builder)?;
             }
             _ => {
                 skip_entry(cursor)?;
@@ -980,13 +1169,16 @@ fn parse_variant_part(
     let shape = if variants.len() == 0 {
         VariantShape::Zero
     } else if variants.len() == 1 {
-        if let Some(d) = variants.keys().next().unwrap() {
+        if variants.keys().next().unwrap().is_some() {
+            // The single variant has a defined discriminator; use the Many
+            // shape.
             VariantShape::Many {
                 discr: discr.unwrap(),
                 member: members.into_iter().next().unwrap(),
                 variants,
             }
         } else {
+            // The single variant has no discriminator.
             let (_d, v) = variants.into_iter().next().unwrap();
             VariantShape::One(v)
         }
@@ -1296,7 +1488,6 @@ fn parse_subrange_type(
         }
     }
 
-    let offset = entry.offset().to_unit_section_offset(unit);
     let ty_goff = ty_goff.unwrap();
     let lower_bound = lower_bound.unwrap_or(0);
 
@@ -1624,4 +1815,440 @@ fn skip_entry(
     }
 
     Ok(())
+}
+
+fn parse_subprogram(
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    builder: &mut TypesBuilder,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let entry = cursor.current().unwrap();
+    assert!(entry.tag() == gim_con::DW_TAG_subprogram);
+    let mut name = None;
+    let mut linkage_name = None;
+    let mut lo_pc = None;
+    let mut hi_pc = None;
+    let mut return_ty_goff = None;
+    let mut decl_coord = DeclCoord::default();
+    let mut abstract_origin = None;
+    let mut noreturn = false;
+
+    let mut attrs = entry.attrs();
+    while let Some(attr) = attrs.next()? {
+        match attr.name() {
+            gim_con::DW_AT_name => {
+                name = Some(get_attr_string(dwarf, attr.value())?);
+            }
+            gim_con::DW_AT_linkage_name => {
+                linkage_name = Some(get_attr_string(dwarf, attr.value())?.into_owned());
+            }
+            gim_con::DW_AT_noreturn => match attr.value() {
+                gimli::AttributeValue::Flag(f) => {
+                    noreturn = f;
+                }
+                v => panic!("unexpected noreturn value: {:?}", v),
+            },
+            gim_con::DW_AT_decl_file => {
+                if let gimli::AttributeValue::FileIndex(f) = attr.value() {
+                    if let Some(lp) = &unit.line_program {
+                        if let Some(fent) = lp.header().file(f) {
+                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            if let Some(dv) = fent.directory(lp.header()) {
+                                decl_coord.file = Some(format!(
+                                    "{}/{}",
+                                    get_attr_string(dwarf, dv)?,
+                                    file,
+                                ));
+                            } else {
+                                decl_coord.file = Some(file.into_owned());
+                            }
+                        } else {
+                            eprintln!("WARN: invalid file index");
+                        }
+                    } else {
+                        eprintln!("WARN: missing line program");
+                    }
+                } else {
+                    eprintln!("WARN: unexpected decl_file type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_line => {
+                decl_coord.line = Some(attr.value().udata_value().unwrap() as u32);
+            }
+            gim_con::DW_AT_decl_column => {
+                decl_coord.column = Some(attr.value().udata_value().unwrap() as u32);
+            }
+            gim_con::DW_AT_low_pc => {
+                if let gimli::AttributeValue::Addr(a) = attr.value() {
+                    lo_pc = Some(a);
+                } else {
+                    eprintln!("WARN: unexpected low_pc type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_high_pc => {
+                hi_pc = Some(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_type => {
+                if let gimli::AttributeValue::UnitRef(o) = attr.value() {
+                    return_ty_goff = Some(o.to_unit_section_offset(&unit));
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
+                    return_ty_goff = Some(o.into());
+                } else {
+                    panic!("unexpected type type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_abstract_origin => {
+                if let gimli::AttributeValue::UnitRef(o) = attr.value() {
+                    abstract_origin = Some(o.to_unit_section_offset(&unit));
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
+                    abstract_origin = Some(o.into());
+                } else {
+                    panic!("unexpected abstract_origin type: {:?}", attr.value());
+                }
+            }
+            // sibling
+            // inline
+            // prototyped
+            // external
+            // frame_base
+            _ => {
+                //println!("skipping subprogram attr: {:x?}", attr.name());
+            }
+        }
+    }
+
+    let pc_range = if let (Some(lo), Some(hi)) = (lo_pc, hi_pc) {
+        Some(lo..lo + hi)
+    } else {
+        None
+    };
+
+    let offset = entry.offset().to_unit_section_offset(unit);
+
+    let mut formal_parameters = vec![];
+    let mut template_type_parameters = vec![];
+    let mut inlines = vec![];
+    if entry.has_children() {
+        while let Some(()) = cursor.next_entry()? {
+            if let Some(child) = cursor.current() {
+                match child.tag() {
+                    gim_con::DW_TAG_formal_parameter => {
+                        formal_parameters
+                            .push(parse_sub_parameter(dwarf, unit, cursor)?);
+                    }
+                    gim_con::DW_TAG_template_type_parameter => {
+                        template_type_parameters.push(
+                            parse_template_type_parameter(
+                                dwarf, unit, cursor,
+                            )?,
+                        );
+                    }
+                    gim_con::DW_TAG_inlined_subroutine => {
+                        inlines
+                            .push(parse_inlined_subroutine(dwarf, unit, cursor)?);
+                    }
+                    // variable
+                    // lexical_block
+                    _ => {
+                        //println!("skipping subprogram content: {:x?}", child.tag());
+                        skip_entry(cursor)?;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    let name = name.map(|s| builder.format_path(s));
+
+    builder.record_subprogram(Subprogram {
+        offset,
+        name,
+        pc_range,
+        decl_coord,
+        return_ty_goff,
+        formal_parameters,
+        template_type_parameters,
+        inlines,
+        abstract_origin,
+        linkage_name,
+        noreturn,
+    });
+
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub struct Subprogram {
+    pub offset: gimli::UnitSectionOffset,
+    pub name: Option<String>,
+    pub pc_range: Option<std::ops::Range<u64>>,
+    pub decl_coord: DeclCoord,
+    pub return_ty_goff: Option<gimli::UnitSectionOffset>,
+    pub formal_parameters: Vec<SubParameter>,
+    pub template_type_parameters: Vec<TemplateTypeParameter>,
+    pub inlines: Vec<InlinedSubroutine>,
+    pub abstract_origin: Option<gimli::UnitSectionOffset>,
+    pub linkage_name: Option<String>,
+    pub noreturn: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubParameter {
+    pub offset: gimli::UnitSectionOffset,
+    pub name: Option<String>,
+    pub decl_coord: DeclCoord,
+    pub ty_goff: Option<gimli::UnitSectionOffset>,
+    pub abstract_origin: Option<gimli::UnitSectionOffset>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DeclCoord {
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InlinedSubroutine {
+    pub offset: gimli::UnitSectionOffset,
+    pub abstract_origin: Option<gimli::UnitSectionOffset>,
+    pub pc_ranges: Vec<gimli::Range>,
+    pub call_coord: DeclCoord,
+    pub inlines: Vec<InlinedSubroutine>,
+    pub formal_parameters: Vec<SubParameter>,
+}
+
+fn parse_sub_parameter(
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+) -> Result<SubParameter, Box<dyn std::error::Error>> {
+    let entry = cursor.current().unwrap();
+    assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
+
+    let mut ty_goff = None;
+    let mut name = None;
+    let mut decl_coord = DeclCoord::default();
+    let mut abstract_origin = None;
+
+    let mut attrs = entry.attrs();
+    while let Some(attr) = attrs.next()? {
+        match attr.name() {
+            gim_con::DW_AT_name => {
+                name = Some(get_attr_string(dwarf, attr.value())?.into_owned());
+            }
+            gim_con::DW_AT_type => {
+                if let gimli::AttributeValue::UnitRef(o) = attr.value() {
+                    ty_goff = Some(o.to_unit_section_offset(&unit));
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
+                    ty_goff = Some(o.into());
+                } else {
+                    panic!("unexpected type type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_abstract_origin => {
+                if let gimli::AttributeValue::UnitRef(o) = attr.value() {
+                    abstract_origin = Some(o.to_unit_section_offset(&unit));
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
+                    abstract_origin = Some(o.into());
+                } else {
+                    panic!("unexpected abstract_origin type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_file => {
+                if let gimli::AttributeValue::FileIndex(f) = attr.value() {
+                    if let Some(lp) = &unit.line_program {
+                        if let Some(fent) = lp.header().file(f) {
+                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            if let Some(dv) = fent.directory(lp.header()) {
+                                decl_coord.file = Some(format!(
+                                    "{}/{}",
+                                    get_attr_string(dwarf, dv)?,
+                                    file,
+                                ));
+                            } else {
+                                decl_coord.file = Some(file.into_owned());
+                            }
+                        } else {
+                            eprintln!("WARN: invalid file index");
+                        }
+                    } else {
+                        eprintln!("WARN: missing line program");
+                    }
+                } else {
+                    eprintln!("WARN: unexpected decl_file type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_line => {
+                decl_coord.line = Some(attr.value().udata_value().unwrap() as u32);
+            }
+            gim_con::DW_AT_decl_column => {
+                decl_coord.column = Some(attr.value().udata_value().unwrap() as u32);
+            }
+            // const_value
+            // location
+            _ => {
+                //println!("skipping subparam attr: {:x?}", attr.name());
+            }
+        }
+    }
+
+    let offset = entry.offset().to_unit_section_offset(unit);
+
+    Ok(SubParameter {
+        offset,
+        name,
+        decl_coord,
+        ty_goff,
+        abstract_origin,
+    })
+}
+
+fn parse_inlined_subroutine(
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+) -> Result<InlinedSubroutine, Box<dyn std::error::Error>> {
+    let entry = cursor.current().unwrap();
+    assert!(entry.tag() == gim_con::DW_TAG_inlined_subroutine);
+
+    let mut abstract_origin = None;
+    let mut call_coord = DeclCoord::default();
+    let mut pc_ranges = vec![];
+    let mut lo_pc = None;
+    let mut hi_pc = None;
+
+    let mut attrs = entry.attrs();
+    while let Some(attr) = attrs.next()? {
+        match attr.name() {
+            gim_con::DW_AT_ranges => {
+                if let gimli::AttributeValue::RangeListsRef(roff) = attr.value() {
+                    let roff = dwarf.ranges_offset_from_raw(unit, roff);
+                    let mut riter = dwarf.ranges(unit, roff)?;
+                    while let Some(range) = riter.next()? {
+                        pc_ranges.push(range);
+                    }
+                } else {
+                    eprintln!("WARN: unexpected ranges type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_call_file => {
+                if let gimli::AttributeValue::FileIndex(f) = attr.value() {
+                    if let Some(lp) = &unit.line_program {
+                        if let Some(fent) = lp.header().file(f) {
+                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            if let Some(dv) = fent.directory(lp.header()) {
+                                call_coord.file = Some(format!(
+                                    "{}/{}",
+                                    get_attr_string(dwarf, dv)?,
+                                    file,
+                                ));
+                            } else {
+                                call_coord.file = Some(file.into_owned());
+                            }
+                        } else {
+                            eprintln!("WARN: invalid file index");
+                        }
+                    } else {
+                        eprintln!("WARN: missing line program");
+                    }
+                } else {
+                    eprintln!("WARN: unexpected call_file type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_call_line => {
+                call_coord.line = Some(attr.value().udata_value().unwrap() as u32);
+            }
+            gim_con::DW_AT_call_column => {
+                call_coord.column = Some(attr.value().udata_value().unwrap() as u32);
+            }
+            gim_con::DW_AT_low_pc => {
+                if let gimli::AttributeValue::Addr(a) = attr.value() {
+                    lo_pc = Some(a);
+                } else {
+                    eprintln!("WARN: unexpected low_pc type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_high_pc => {
+                hi_pc = Some(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_abstract_origin => {
+                if let gimli::AttributeValue::UnitRef(o) = attr.value() {
+                    abstract_origin = Some(o.to_unit_section_offset(&unit));
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
+                    abstract_origin = Some(o.into());
+                } else {
+                    panic!("unexpected abstract_origin type: {:?}", attr.value());
+                }
+            }
+            _ => {
+                //println!("skipping inlined subroutine attr: {:x?}", attr.name());
+            }
+        }
+    }
+
+    if let (Some(begin), Some(off)) = (lo_pc, hi_pc) {
+        pc_ranges.push(gimli::Range {
+            begin,
+            end: begin + off,
+        });
+    }
+
+    let offset = entry.offset().to_unit_section_offset(unit);
+
+    let mut inlines = vec![];
+    let mut formal_parameters = vec![];
+    if entry.has_children() {
+        while let Some(()) = cursor.next_entry()? {
+            if let Some(child) = cursor.current() {
+                match child.tag() {
+                    gim_con::DW_TAG_inlined_subroutine => {
+                        inlines
+                            .push(parse_inlined_subroutine(dwarf, unit, cursor)?);
+                    }
+                    gim_con::DW_TAG_formal_parameter => {
+                        formal_parameters
+                            .push(parse_sub_parameter(dwarf, unit, cursor)?);
+                    }
+                    // lexical_block
+                    _ => {
+                        //println!("skipping subroutine content: {:x?}", child.tag());
+                        skip_entry(cursor)?;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    Ok(InlinedSubroutine {
+        offset,
+        pc_ranges,
+        abstract_origin,
+        call_coord,
+        inlines,
+        formal_parameters,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct LineNumberRow {
+    pub pc_range: std::ops::Range<u64>,
+    pub file: String,
+    pub line: Option<NonZeroU64>,
+    pub column: Option<NonZeroU64>,
 }
