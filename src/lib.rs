@@ -11,7 +11,19 @@ use gimli::constants as gim_con;
 
 // Internal type abbreviations
 type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
-type BTreeIndex<K> = BTreeMap<K, BTreeSet<gimli::UnitSectionOffset>>;
+type BTreeIndex<I, K> = BTreeMap<K, BTreeSet<I>>;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct TypeId(pub gimli::UnitSectionOffset);
+
+impl From<gimli::UnitSectionOffset> for TypeId {
+    fn from(x: gimli::UnitSectionOffset) -> Self {
+        Self(x)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct ProgramId(pub gimli::UnitSectionOffset);
 
 /// A database of types extracted from the debug info of a program.
 ///
@@ -33,7 +45,7 @@ pub struct Types {
     ///
     /// Invariant: within each entry, the key is the same as the type's `offset`
     /// field.
-    types: BTreeMap<gimli::UnitSectionOffset, Type>,
+    types: BTreeMap<TypeId, Type>,
 
     /// Index: type name to location(s) that can be looked up in `types`.
     ///
@@ -41,12 +53,12 @@ pub struct Types {
     ///
     /// Invariant: all UnitSectionOffset values have corresponding entries in
     /// `types`.
-    type_name_index: BTreeIndex<String>,
+    type_name_index: BTreeIndex<TypeId, String>,
 
     /// Index: array element type and size to location(s) in `types`. Since
     /// arrays do not have names in DWARF, they can't be looked up in the
     /// `type_name_index`.
-    array_index: BTreeIndex<(gimli::UnitSectionOffset, Option<u64>)>,
+    array_index: BTreeIndex<TypeId, (TypeId, Option<u64>)>,
 
     /// Index: subroutine argument and return types to location(s) in `types`.
     /// Since subroutine types do not have names in DWARF, they can't be looked
@@ -58,10 +70,10 @@ pub struct Types {
     /// were instead a `(Vec<Goff>, Option<Goff>)`.
     ///
     /// Note that this is subroutine _types,_ not subprograms.
-    subroutine_index: BTreeMap<Vec<gimli::UnitSectionOffset>, BTreeIndex<Option<gimli::UnitSectionOffset>>>,
+    subroutine_index: BTreeMap<Vec<TypeId>, BTreeIndex<TypeId, Option<TypeId>>>,
 
     /// All subprograms, indexed by location in the debug section(s).
-    subprograms: BTreeMap<gimli::UnitSectionOffset, Subprogram>,
+    subprograms: BTreeMap<ProgramId, Subprogram>,
 
     /// Mapping of text address to line number information.
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
@@ -90,32 +102,31 @@ impl Types {
     /// with their unique section offsets.
     pub fn types(
         &self,
-    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
-        self.types.iter().map(|(&goff, ty)| (goff, ty))
+    ) -> impl Iterator<Item = (TypeId, &Type)> + '_ {
+        self.types.iter().map(|(&id, ty)| (id, ty))
     }
 
-    /// Looks up the type corresponding to a unique section offset. If the
-    /// offset was found inside another type in `self`, our consistency rules
-    /// guarantee that this will return `Some`, so it can be unwrapped.
+    /// Looks up the type with the given ID.
     ///
-    /// If you've gotten `goff` from somewhere else, you may or may not find a
-    /// type.
-    pub fn type_from_goff(
+    /// If you got `id` from this instance, our consistency invariant ensures
+    /// that the result will be `Some`. If `id` is from another instance, or
+    /// made up, you may get `None`.
+    pub fn type_by_id(
         &self,
-        goff: gimli::UnitSectionOffset,
+        id: TypeId,
     ) -> Option<&Type> {
-        self.types.get(&goff)
+        self.types.get(&id)
     }
 
-    /// Shorthand for looking up the name of a type by unique section offset.
+    /// Shorthand for looking up the name of a type.
     ///
     /// If the offset was found inside another type in `self`, our consistency
     /// rules guarantee that this will return `Some`.
-    pub fn name_from_goff(
+    pub fn type_name(
         &self,
-        goff: gimli::UnitSectionOffset,
+        id: TypeId,
     ) -> Option<Cow<'_, str>> {
-        Some(self.type_from_goff(goff)?.name(self))
+        Some(self.type_by_id(id)?.name(self))
     }
 
     /// Consults the type-name index and returns an iterator over types with a
@@ -126,7 +137,7 @@ impl Types {
     pub fn types_by_name(
         &self,
         name: &str,
-    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
+    ) -> impl Iterator<Item = (TypeId, &Type)> + '_ {
         self.consult_index(&self.type_name_index, name)
     }
 
@@ -134,9 +145,9 @@ impl Types {
     /// particular shape.
     pub fn array_types(
         &self,
-        element: gimli::UnitSectionOffset,
+        element: TypeId,
         count: Option<u64>,
-    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
+    ) -> impl Iterator<Item = (TypeId, &Type)> + '_ {
         self.consult_index(&self.array_index, &(element, count))
     }
 
@@ -148,9 +159,9 @@ impl Types {
     /// looking up subroutines returning the `()` type will not produce results.
     pub fn subroutine_types(
         &self,
-        argument_tys: &[gimli::UnitSectionOffset],
-        return_ty: Option<gimli::UnitSectionOffset>,
-    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Type)> + '_ {
+        argument_tys: &[TypeId],
+        return_ty: Option<TypeId>,
+    ) -> impl Iterator<Item = (TypeId, &Type)> + '_ {
         self.subroutine_index
             .get(argument_tys)
             .into_iter()
@@ -161,8 +172,15 @@ impl Types {
 
     pub fn subprograms(
         &self,
-    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &Subprogram)> + '_ {
+    ) -> impl Iterator<Item = (ProgramId, &Subprogram)> + '_ {
         self.subprograms.iter().map(|(&goff, ty)| (goff, ty))
+    }
+
+    pub fn subprogram_by_id(
+        &self,
+        pid: ProgramId,
+    ) -> Option<&Subprogram> {
+        self.subprograms.get(&pid)
     }
 
     pub fn line_table_rows(
@@ -186,9 +204,9 @@ impl Types {
     /// the goffs and (2) attaching the associated `Type` to each item.
     fn consult_index<'d, K, Q>(
         &'d self,
-        index: &'d BTreeIndex<K>,
+        index: &'d BTreeIndex<TypeId, K>,
         key: &Q,
-    ) -> impl Iterator<Item = (gimli::UnitSectionOffset, &'d Type)> + 'd
+    ) -> impl Iterator<Item = (TypeId, &'d Type)> + 'd
         where K: std::borrow::Borrow<Q> + Ord,
               Q: Ord + ?Sized,
     {
@@ -212,9 +230,9 @@ pub struct TypesBuilder {
     path: Vec<String>,
     endian: gimli::RunTimeEndian,
     is_64: bool,
-    types: BTreeMap<gimli::UnitSectionOffset, Type>,
+    types: BTreeMap<TypeId, Type>,
 
-    subprograms: BTreeMap<gimli::UnitSectionOffset, Subprogram>,
+    subprograms: BTreeMap<ProgramId, Subprogram>,
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
 }
 
@@ -233,11 +251,11 @@ impl TypesBuilder {
     }
 
     pub fn build(self) -> Result<Types, Box<dyn std::error::Error>> {
-        let check = |goff| -> Result<(), Box<dyn std::error::Error>> {
-            if self.types.contains_key(&goff) {
+        let check = |id| -> Result<(), Box<dyn std::error::Error>> {
+            if self.types.contains_key(&id) {
                 Ok(())
             } else {
-                Err(format!("reference to missing type {:x?}", goff).into())
+                Err(format!("reference to missing type {:x?}", id).into())
             }
         };
         // Validate that the world is complete and internally consistent.
@@ -248,65 +266,55 @@ impl TypesBuilder {
 
                 Type::Struct(s) => {
                     for ttp in &s.template_type_parameters {
-                        check(ttp.ty_goff.into())?;
+                        check(ttp.type_id)?;
                     }
                     for m in s.members.values() {
-                        check(m.ty_goff.into())?;
+                        check(m.type_id)?;
                     }
                 }
                 Type::Union(s) => {
                     for ttp in &s.template_type_parameters {
-                        check(ttp.ty_goff.into())?;
+                        check(ttp.type_id)?;
                     }
                     for m in &s.members {
-                        check(m.ty_goff.into())?;
+                        check(m.type_id)?;
                     }
                 }
                 Type::Enum(s) => {
                     for ttp in &s.template_type_parameters {
-                        check(ttp.ty_goff.into())?;
+                        check(ttp.type_id)?;
                     }
                     match &s.variant_part.shape {
                         VariantShape::Zero => (),
                         VariantShape::One(variant) => {
-                            check(variant.member.ty_goff)?;
+                            check(variant.member.type_id)?;
                         }
                         VariantShape::Many {
                             member, variants, ..
                         } => {
-                            check(member.ty_goff)?;
+                            check(member.type_id)?;
                             for v in variants.values() {
-                                check(v.member.ty_goff)?;
+                                check(v.member.type_id)?;
                             }
                         }
                     }
                 }
                 Type::Array(s) => {
-                    check(s.element_ty_goff.into())?;
+                    check(s.element_type_id)?;
                     // The index type is synthetic, but, might as well.
-                    check(s.index_ty_goff.into())?;
+                    check(s.index_type_id)?;
                 }
                 Type::Pointer(s) => {
-                    check(s.ty_goff.into())?;
+                    check(s.type_id)?;
                 }
                 Type::Subroutine(s) => {
-                    if let Some(t) = s.return_ty_goff {
-                        check(t.into())?;
+                    if let Some(t) = s.return_type_id {
+                        check(t)?;
                     }
                     for &t in &s.formal_parameters {
-                        check(t.into())?;
+                        check(t)?;
                     }
                 }
-            }
-        }
-
-        // Check that line number ranges meet our expectations.
-        for rows in self.line_table.values() {
-            let non_empty_count = rows.iter()
-                .filter(|row| !row.pc_range.is_empty())
-                .count();
-            if non_empty_count > 1 {
-                println!("Overlap at {:#x?}", rows);
             }
         }
 
@@ -322,24 +330,41 @@ impl TypesBuilder {
         });
         // Build array index.
         let array_index = index_by_key(&self.types, |_, t| match t {
-            Type::Array(a) => Some((a.element_ty_goff, a.count)),
+            Type::Array(a) => Some((a.element_type_id, a.count)),
             _ => None,
         });
         // Build subroutine index. This is more complex in shape than the other
         // indices.
         let subroutine_index = {
-            let mut ind = BTreeMap::<_, BTreeIndex<_>>::new();
+            let mut ind = BTreeMap::<_, BTreeIndex<_, _>>::new();
             for (k, v) in &self.types {
                 if let Type::Subroutine(s) = v {
                     ind.entry(s.formal_parameters.clone())
                         .or_default()
-                        .entry(s.return_ty_goff)
+                        .entry(s.return_type_id)
                         .or_default()
                         .insert(*k);
                 }
             }
             ind
         };
+
+        fn check_inl(inl: &InlinedSubroutine) -> Result<(), Box<dyn std::error::Error>> {
+            if inl.abstract_origin.is_none() {
+                return Err(format!("inlined subroutine w/o abstract origin at {:?}", inl.offset).into());
+            }
+            for inner in &inl.inlines {
+                check_inl(inner)?;
+            }
+            Ok(())
+        }
+
+        // Check that inlined subroutines match our expectations.
+        for subprogram in self.subprograms.values() {
+            for inl in &subprogram.inlines {
+                check_inl(inl)?;
+            }
+        }
         Ok(Types {
             endian: self.endian,
             types: self.types,
@@ -358,11 +383,11 @@ impl TypesBuilder {
     /// useful if you have additional type information from some outside source.
     pub fn record_type(&mut self, t: impl Into<Type>) {
         let t = t.into();
-        self.types.insert(t.offset(), t);
+        self.types.insert(TypeId(t.offset()), t);
     }
 
     pub fn record_subprogram(&mut self, t: Subprogram) {
-        self.subprograms.insert(t.offset, t);
+        self.subprograms.insert(ProgramId(t.offset), t);
     }
 
     pub fn record_line_table_row(&mut self, addr: u64, r: LineNumberRow) {
@@ -752,7 +777,7 @@ impl Type {
             Self::CEnum(s) => Some(s.alignment),
             Self::Union(s) => Some(s.alignment),
             Self::Array(a) => {
-                let eltty = world.type_from_goff(a.element_ty_goff.into())?;
+                let eltty = world.type_by_id(a.element_type_id)?;
                 eltty.alignment(world)
             }
             Self::Pointer(_) => Some(world.pointer_size()),
@@ -768,7 +793,7 @@ impl Type {
             Self::CEnum(s) => Some(s.byte_size),
             Self::Union(s) => Some(s.byte_size),
             Self::Array(a) => {
-                let eltty = world.type_from_goff(a.element_ty_goff.into())?;
+                let eltty = world.type_by_id(a.element_type_id)?;
                 let eltsize = eltty.byte_size(world)?;
                 Some(a.count? * eltsize)
             }
@@ -787,7 +812,7 @@ impl Type {
             Self::Pointer(s) => (&s.name).into(),
             Self::Array(a) => {
                 let eltname = world
-                    .type_from_goff(a.element_ty_goff.into())
+                    .type_by_id(a.element_type_id.into())
                     .map(|t| t.name(world))
                     .unwrap_or("???".into());
 
@@ -983,7 +1008,7 @@ fn parse_structure_type(
 #[derive(Debug, Clone)]
 pub struct TemplateTypeParameter {
     pub name: String,
-    pub ty_goff: gimli::UnitSectionOffset,
+    pub type_id: TypeId,
 }
 
 fn parse_template_type_parameter(
@@ -994,7 +1019,7 @@ fn parse_template_type_parameter(
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_template_type_parameter);
 
-    let mut ty_goff = None;
+    let mut type_id = None;
     let mut name = None;
 
     let mut attrs = entry.attrs();
@@ -1005,11 +1030,11 @@ fn parse_template_type_parameter(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    ty_goff = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(&unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    ty_goff = Some(o.into());
+                    type_id = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1018,17 +1043,17 @@ fn parse_template_type_parameter(
         }
     }
 
-    let (name, ty_goff) = (name.unwrap(), ty_goff.unwrap());
+    let (name, type_id) = (name.unwrap(), TypeId(type_id.unwrap()));
     let name = name.to_string();
 
-    Ok(TemplateTypeParameter { name, ty_goff })
+    Ok(TemplateTypeParameter { name, type_id })
 }
 
 #[derive(Debug, Clone)]
 pub struct Member {
     pub name: Option<String>,
     pub artificial: bool,
-    pub ty_goff: gimli::UnitSectionOffset,
+    pub type_id: TypeId,
     pub alignment: Option<u64>,
     pub location: u64,
     pub offset: gimli::UnitSectionOffset,
@@ -1043,7 +1068,7 @@ fn parse_member(
     assert!(entry.tag() == gim_con::DW_TAG_member);
 
     let mut name = None;
-    let mut ty_goff = None;
+    let mut type_id = None;
     let mut alignment = None;
     let mut location = None;
     let mut artificial = false;
@@ -1062,11 +1087,11 @@ fn parse_member(
             },
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    ty_goff = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(&unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    ty_goff = Some(o.into());
+                    type_id = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1082,14 +1107,14 @@ fn parse_member(
     }
 
     let offset = entry.offset().to_unit_section_offset(unit);
-    let ty_goff = ty_goff.unwrap();
+    let type_id = TypeId(type_id.unwrap());
     let location = location.unwrap();
     let name = name.map(|s| s.to_string());
 
     Ok(Member {
         name,
         artificial,
-        ty_goff,
+        type_id,
         alignment,
         location,
         offset,
@@ -1380,8 +1405,8 @@ fn parse_enumerator(
 
 #[derive(Debug, Clone)]
 pub struct Array {
-    pub element_ty_goff: gimli::UnitSectionOffset,
-    pub index_ty_goff: gimli::UnitSectionOffset,
+    pub element_type_id: TypeId,
+    pub index_type_id: TypeId,
     pub lower_bound: u64,
     pub count: Option<u64>,
     pub offset: gimli::UnitSectionOffset,
@@ -1397,18 +1422,18 @@ fn parse_array_type(
     assert!(entry.tag() == gim_con::DW_TAG_array_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
-    let mut element_ty_goff = None;
+    let mut element_type_id = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    element_ty_goff = Some(o.to_unit_section_offset(&unit));
+                    element_type_id = Some(o.to_unit_section_offset(&unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    element_ty_goff = Some(o.into());
+                    element_type_id = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1417,7 +1442,7 @@ fn parse_array_type(
         }
     }
 
-    let element_ty_goff = element_ty_goff.unwrap();
+    let element_type_id = TypeId(element_type_id.unwrap());
 
     let mut subrange = None;
     if entry.has_children() {
@@ -1437,11 +1462,11 @@ fn parse_array_type(
             }
         }
     }
-    let (index_ty_goff, lower_bound, count) = subrange.unwrap();
+    let (index_type_id, lower_bound, count) = subrange.unwrap();
 
     builder.record_type(Array {
-        element_ty_goff,
-        index_ty_goff,
+        element_type_id,
+        index_type_id,
         lower_bound,
         count,
         offset,
@@ -1454,13 +1479,13 @@ fn parse_subrange_type(
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
 ) -> Result<
-    (gimli::UnitSectionOffset, u64, Option<u64>),
+    (TypeId, u64, Option<u64>),
     Box<dyn std::error::Error>,
 > {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_subrange_type);
 
-    let mut ty_goff = None;
+    let mut type_id = None;
     let mut lower_bound = None;
     let mut count = None;
 
@@ -1469,11 +1494,11 @@ fn parse_subrange_type(
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    ty_goff = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(&unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    ty_goff = Some(o.into());
+                    type_id = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1488,7 +1513,7 @@ fn parse_subrange_type(
         }
     }
 
-    let ty_goff = ty_goff.unwrap();
+    let type_id = TypeId(type_id.unwrap());
     let lower_bound = lower_bound.unwrap_or(0);
 
     if entry.has_children() {
@@ -1504,12 +1529,12 @@ fn parse_subrange_type(
             }
         }
     }
-    Ok((ty_goff, lower_bound, count))
+    Ok((type_id, lower_bound, count))
 }
 
 #[derive(Debug, Clone)]
 pub struct Pointer {
-    pub ty_goff: gimli::UnitSectionOffset,
+    pub type_id: TypeId,
     pub name: String,
     pub offset: gimli::UnitSectionOffset,
 }
@@ -1525,7 +1550,7 @@ fn parse_pointer_type(
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut name = None;
-    let mut ty_goff = None;
+    let mut type_id = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
@@ -1535,11 +1560,11 @@ fn parse_pointer_type(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    ty_goff = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(&unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    ty_goff = Some(o.into());
+                    type_id = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1552,13 +1577,12 @@ fn parse_pointer_type(
         }
     }
 
-    if name.is_none() || ty_goff.is_none() {
-        eprintln!("uh weird {:x?}", offset);
+    if name.is_none() || type_id.is_none() {
         return Ok(());
     }
 
     let name = name.unwrap().into_owned();
-    let ty_goff = ty_goff.unwrap();
+    let type_id = TypeId(type_id.unwrap());
 
     if entry.has_children() {
         while let Some(()) = cursor.next_entry()? {
@@ -1575,7 +1599,7 @@ fn parse_pointer_type(
     }
 
     builder.record_type(Pointer {
-        ty_goff,
+        type_id,
         name,
         offset,
     });
@@ -1672,8 +1696,8 @@ fn parse_union_type(
 
 #[derive(Clone, Debug)]
 pub struct Subroutine {
-    pub return_ty_goff: Option<gimli::UnitSectionOffset>,
-    pub formal_parameters: Vec<gimli::UnitSectionOffset>,
+    pub return_type_id: Option<TypeId>,
+    pub formal_parameters: Vec<TypeId>,
     pub offset: gimli::UnitSectionOffset,
 }
 
@@ -1687,18 +1711,18 @@ fn parse_subroutine_type(
     assert!(entry.tag() == gim_con::DW_TAG_subroutine_type);
 
     let offset = entry.offset().to_unit_section_offset(unit);
-    let mut return_ty_goff = None;
+    let mut return_type_id = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    return_ty_goff = Some(o.to_unit_section_offset(&unit));
+                    return_type_id = Some(TypeId(o.to_unit_section_offset(&unit)));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    return_ty_goff = Some(o.into());
+                    return_type_id = Some(TypeId(o.into()));
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1728,7 +1752,7 @@ fn parse_subroutine_type(
     }
 
     builder.record_type(Subroutine {
-        return_ty_goff,
+        return_type_id,
         formal_parameters,
         offset,
     });
@@ -1739,22 +1763,22 @@ fn parse_formal_parameter(
     _dwarf: &gimli::Dwarf<RtSlice<'_>>,
     unit: &gimli::Unit<RtSlice<'_>>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
-) -> Result<gimli::UnitSectionOffset, Box<dyn std::error::Error>> {
+) -> Result<TypeId, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
 
-    let mut ty_goff = None;
+    let mut type_id = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    ty_goff = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(&unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    ty_goff = Some(o.into());
+                    type_id = Some(o.into());
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1763,9 +1787,9 @@ fn parse_formal_parameter(
         }
     }
 
-    let ty_goff = ty_goff.unwrap();
+    let type_id = TypeId(type_id.unwrap());
 
-    Ok(ty_goff)
+    Ok(type_id)
 }
 
 fn get_attr_string<'a>(
@@ -1829,7 +1853,7 @@ fn parse_subprogram(
     let mut linkage_name = None;
     let mut lo_pc = None;
     let mut hi_pc = None;
-    let mut return_ty_goff = None;
+    let mut return_type_id = None;
     let mut decl_coord = DeclCoord::default();
     let mut abstract_origin = None;
     let mut noreturn = false;
@@ -1891,11 +1915,11 @@ fn parse_subprogram(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    return_ty_goff = Some(o.to_unit_section_offset(&unit));
+                    return_type_id = Some(TypeId(o.to_unit_section_offset(&unit)));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    return_ty_goff = Some(o.into());
+                    return_type_id = Some(TypeId(o.into()));
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -1972,7 +1996,7 @@ fn parse_subprogram(
         name,
         pc_range,
         decl_coord,
-        return_ty_goff,
+        return_type_id,
         formal_parameters,
         template_type_parameters,
         inlines,
@@ -1990,7 +2014,7 @@ pub struct Subprogram {
     pub name: Option<String>,
     pub pc_range: Option<std::ops::Range<u64>>,
     pub decl_coord: DeclCoord,
-    pub return_ty_goff: Option<gimli::UnitSectionOffset>,
+    pub return_type_id: Option<TypeId>,
     pub formal_parameters: Vec<SubParameter>,
     pub template_type_parameters: Vec<TemplateTypeParameter>,
     pub inlines: Vec<InlinedSubroutine>,
@@ -2004,7 +2028,7 @@ pub struct SubParameter {
     pub offset: gimli::UnitSectionOffset,
     pub name: Option<String>,
     pub decl_coord: DeclCoord,
-    pub ty_goff: Option<gimli::UnitSectionOffset>,
+    pub type_id: Option<TypeId>,
     pub abstract_origin: Option<gimli::UnitSectionOffset>,
 }
 
@@ -2033,7 +2057,7 @@ fn parse_sub_parameter(
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
 
-    let mut ty_goff = None;
+    let mut type_id = None;
     let mut name = None;
     let mut decl_coord = DeclCoord::default();
     let mut abstract_origin = None;
@@ -2046,11 +2070,11 @@ fn parse_sub_parameter(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    ty_goff = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(TypeId(o.to_unit_section_offset(&unit)));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
-                    ty_goff = Some(o.into());
+                    type_id = Some(TypeId(o.into()));
                 } else {
                     panic!("unexpected type type: {:?}", attr.value());
                 }
@@ -2110,7 +2134,7 @@ fn parse_sub_parameter(
         offset,
         name,
         decl_coord,
-        ty_goff,
+        type_id,
         abstract_origin,
     })
 }

@@ -1,5 +1,5 @@
 use crate::load::{choose_variant, load_unsigned, Load};
-use crate::{Encoding, Type, Types};
+use crate::{Encoding, Type, Types, TypeId};
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
@@ -96,7 +96,7 @@ impl Load for Struct {
 
             for m in s.members.values() {
                 if let Some(n) = &m.name {
-                    let t = world.type_from_goff(m.ty_goff.into()).unwrap();
+                    let t = world.type_by_id(m.type_id).unwrap();
                     let ma = addr + usize::try_from(m.location).unwrap();
                     let v = Value::from_buffer(buffer, ma, world, t)?;
                     members.insert(n.clone(), v);
@@ -130,8 +130,8 @@ impl Load for Enum {
         if let Type::Enum(s) = ty {
             let v = choose_variant(buffer, addr, world, s)?;
 
-            let vty_goff = v.member.ty_goff;
-            let vty = world.type_from_goff(vty_goff.into()).unwrap();
+            let vtype_id = v.member.type_id;
+            let vty = world.type_by_id(vtype_id).unwrap();
             let va = addr + usize::try_from(v.member.location)?;
             let value = Struct::from_buffer(buffer, va, world, vty)?;
 
@@ -185,7 +185,7 @@ impl Load for CEnum {
 #[derive(Clone, Debug)]
 pub struct Pointer {
     name: String,
-    dest_ty_goff: gimli::UnitSectionOffset,
+    dest_type_id: TypeId,
     value: u64,
 }
 
@@ -203,7 +203,7 @@ impl Load for Pointer {
 
             Ok(Self {
                 name: s.name.clone(),
-                dest_ty_goff: s.ty_goff,
+                dest_type_id: s.type_id,
                 value,
             })
         } else {

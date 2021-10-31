@@ -40,11 +40,11 @@ fn dump_file<'a>(
                 println!("    tuple_like: {:?}", s.tuple_like);
                 for m in &s.template_type_parameters {
                     let tyname = everything
-                        .name_from_goff(m.ty_goff.into())
+                        .type_name(m.type_id)
                         .unwrap_or("???".into());
                     println!(
                         "    template_type_parameter {}: {} ({:x?})",
-                        m.name, tyname, m.ty_goff,
+                        m.name, tyname, m.type_id,
                     );
                 }
                 for m in s.members.values() {
@@ -61,9 +61,9 @@ fn dump_file<'a>(
                         println!("        artificial: true");
                     }
                     let tyname = everything
-                        .name_from_goff(m.ty_goff.into())
+                        .type_name(m.type_id)
                         .unwrap_or("???".into());
-                    println!("        type: {:?} ({:x?})", tyname, m.ty_goff);
+                    println!("        type: {:?} ({:x?})", tyname, m.type_id);
                 }
             }
             Type::Union(s) => {
@@ -73,11 +73,11 @@ fn dump_file<'a>(
                 println!("    offset: {:x?}", s.offset);
                 for m in &s.template_type_parameters {
                     let tyname = everything
-                        .name_from_goff(m.ty_goff.into())
+                        .type_name(m.type_id)
                         .unwrap_or("???".into());
                     println!(
                         "    template_type_parameter {}: {} ({:x?})",
-                        m.name, tyname, m.ty_goff,
+                        m.name, tyname, m.type_id,
                     );
                 }
                 for m in &s.members {
@@ -92,9 +92,9 @@ fn dump_file<'a>(
                         println!("        artificial: true,");
                     }
                     let tyname = everything
-                        .name_from_goff(m.ty_goff.into())
+                        .type_name(m.type_id)
                         .unwrap_or("???".into());
-                    println!("        type: {:?} ({:x?}),", tyname, m.ty_goff);
+                    println!("        type: {:?} ({:x?}),", tyname, m.type_id);
                 }
             }
             Type::Enum(s) => {
@@ -104,11 +104,11 @@ fn dump_file<'a>(
                 println!("    offset: {:x?}", s.offset);
                 for m in &s.template_type_parameters {
                     let tyname = everything
-                        .name_from_goff(m.ty_goff.into())
+                        .type_name(m.type_id)
                         .unwrap_or("???".into());
                     println!(
                         "    template_type_parameter {}: {} ({:x?})",
-                        m.name, tyname, m.ty_goff,
+                        m.name, tyname, m.type_id,
                     );
                 }
 
@@ -131,9 +131,9 @@ fn dump_file<'a>(
                         println!("        artificial: true,");
                     }
                     let tyname = everything
-                        .name_from_goff(m.ty_goff.into())
+                        .type_name(m.type_id)
                         .unwrap_or("???".into());
-                    println!("        type: {:?} ({:x?}),", tyname, m.ty_goff);
+                    println!("        type: {:?} ({:x?}),", tyname, m.type_id);
                 };
                 match &s.variant_part.shape {
                     VariantShape::Many {
@@ -150,11 +150,11 @@ fn dump_file<'a>(
                             println!("        artificial: true,");
                         }
                         let tyname = everything
-                            .name_from_goff(member.ty_goff.into())
+                            .type_name(member.type_id)
                             .unwrap_or("???".into());
                         println!(
                             "        type: {:?} ({:x?}),",
-                            tyname, member.ty_goff
+                            tyname, member.type_id
                         );
                         for (&d, v) in variants {
                             print_variant(d, v);
@@ -181,22 +181,22 @@ fn dump_file<'a>(
             Type::Pointer(s) => {
                 println!("{:x?} = ptr {}", goff, s.name);
                 let tyname = everything
-                    .name_from_goff(s.ty_goff.into())
+                    .type_name(s.type_id)
                     .unwrap_or("???".into());
-                println!("    points_to: {} ({:x?})", tyname, s.ty_goff);
+                println!("    points_to: {} ({:x?})", tyname, s.type_id);
                 println!("    offset: {:x?},", s.offset);
             }
             Type::Subroutine(s) => {
                 println!("{:x?} = subroutine", goff);
                 for &p in &s.formal_parameters {
                     let tyname = everything
-                        .name_from_goff(p.into())
+                        .type_name(p.into())
                         .unwrap_or("???".into());
                     println!("    param: {}", tyname);
                 }
-                if let Some(t) = s.return_ty_goff {
+                if let Some(t) = s.return_type_id {
                     let tyname = everything
-                        .name_from_goff(t.into())
+                        .type_name(t.into())
                         .unwrap_or("???".into());
                     println!("    returns: {}", tyname);
                 }
@@ -205,13 +205,13 @@ fn dump_file<'a>(
                 println!("{:x?} = array", goff);
                 {
                     let tyname = everything
-                        .name_from_goff(a.element_ty_goff.into())
+                        .type_name(a.element_type_id)
                         .unwrap_or("???".into());
                     println!("    element_type: {}", tyname);
                 }
                 {
                     let tyname = everything
-                        .name_from_goff(a.index_ty_goff.into())
+                        .type_name(a.index_type_id)
                         .unwrap_or("???".into());
                     println!("    index_type: {}", tyname);
                 }
@@ -243,9 +243,9 @@ fn dump_file<'a>(
             sp.decl_coord.line.unwrap_or(0),
             sp.decl_coord.column.unwrap_or(0),
             );
-        if let Some(rt) = sp.return_ty_goff {
+        if let Some(rt) = sp.return_type_id {
             println!("- returns: {}",
-                everything.name_from_goff(rt)
+                everything.type_name(rt)
                 .unwrap_or("???".into()));
         }
         if sp.noreturn {
@@ -254,7 +254,7 @@ fn dump_file<'a>(
         if !sp.template_type_parameters.is_empty() {
             println!("- type parameters:");
             for ttp in &sp.template_type_parameters {
-                println!("  - {} = {:x?}", ttp.name, ttp.ty_goff);
+                println!("  - {} = {:x?}", ttp.name, ttp.type_id);
             }
         }
         if !sp.formal_parameters.is_empty() {
@@ -270,9 +270,9 @@ fn dump_file<'a>(
                     p.decl_coord.line.unwrap_or(0),
                     p.decl_coord.column.unwrap_or(0),
                 );
-                if let Some(t) = p.ty_goff {
+                if let Some(t) = p.type_id {
                     println!("    - type: {}",
-                        everything.name_from_goff(t)
+                        everything.type_name(t)
                         .unwrap_or("???".into()));
                 }
                 if let Some(ao) = p.abstract_origin {
@@ -341,10 +341,10 @@ fn print_inlined_subroutine(everything: &dwarfldr::Types, is: &dwarfldr::Inlined
                 p.decl_coord.column.unwrap_or(0),
                 indent = indent,
             );
-            if let Some(t) = p.ty_goff {
+            if let Some(t) = p.type_id {
                 println!("{:indent$}      - type: {}",
                     "",
-                    everything.name_from_goff(t).unwrap_or("???".into()),
+                    everything.type_name(t).unwrap_or("???".into()),
                     indent = indent
                 );
             }

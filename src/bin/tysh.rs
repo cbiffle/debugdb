@@ -1,6 +1,6 @@
 use structopt::StructOpt;
 
-use dwarfldr::{Type, Variant, VariantShape, Encoding};
+use dwarfldr::{Type, Variant, VariantShape, Encoding, TypeId};
 
 #[derive(Debug, StructOpt)]
 struct TySh {
@@ -81,21 +81,21 @@ impl std::fmt::Display for Goff {
     }
 }
 
-struct NamedGoff<'a>(&'a dwarfldr::Types, gimli::UnitSectionOffset);
+struct NamedGoff<'a>(&'a dwarfldr::Types, TypeId);
 
 impl std::fmt::Display for NamedGoff<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let bold = ansi_term::Style::new().bold();
         let dim = ansi_term::Style::new().dimmed();
 
-        let n = if let Some(name) = self.0.name_from_goff(self.1) {
+        let n = if let Some(name) = self.0.type_name(self.1) {
             name
         } else {
             "<anonymous type>".into()
         };
 
         write!(f, "{}", bold.paint(n))?;
-        match self.1 {
+        match self.1.0 {
             gimli::UnitSectionOffset::DebugInfoOffset(gimli::DebugInfoOffset(x)) => {
                 write!(f, " {}<.debug_info+0x{:08x}>{}", dim.prefix(), x, dim.suffix())
             }
@@ -123,7 +123,7 @@ fn cmd_list(
 ) {
     for (goff, _) in db.types() {
         if !args.is_empty() {
-            if let Some(name) = db.name_from_goff(goff) {
+            if let Some(name) = db.type_name(goff) {
                 if !name.contains(args) {
                     continue;
                 }
@@ -141,7 +141,7 @@ fn parse_type_name(s: &str) -> Option<ParsedTypeName<'_>> {
         return if rest.starts_with("info+0x") {
             let num = &rest[7..rest.len() - 1];
             if let Ok(n) = usize::from_str_radix(num, 16) {
-                Some(ParsedTypeName::Goff(gimli::DebugInfoOffset(n).into()))
+                Some(ParsedTypeName::Goff(TypeId(gimli::DebugInfoOffset(n).into())))
             } else {
                 println!("can't parse {} as hex", num);
                 None
@@ -149,7 +149,7 @@ fn parse_type_name(s: &str) -> Option<ParsedTypeName<'_>> {
         } else if rest.starts_with("types+0x") {
             let num = &rest[8..rest.len() - 1];
             if let Ok(n) = usize::from_str_radix(num, 16) {
-                Some(ParsedTypeName::Goff(gimli::DebugTypesOffset(n).into()))
+                Some(ParsedTypeName::Goff(TypeId(gimli::DebugTypesOffset(n).into())))
             } else {
                 println!("can't parse {} as hex", num);
                 None
@@ -165,7 +165,7 @@ fn parse_type_name(s: &str) -> Option<ParsedTypeName<'_>> {
 
 enum ParsedTypeName<'a> {
     Name(&'a str),
-    Goff(gimli::UnitSectionOffset),
+    Goff(TypeId),
 }
 
 fn simple_query_cmd(
@@ -180,7 +180,7 @@ fn simple_query_cmd(
             db.types_by_name(n).collect()
         }
         Some(ParsedTypeName::Goff(o)) => {
-            db.type_from_goff(o).into_iter()
+            db.type_by_id(o).into_iter()
                 .map(|t| (o, t))
                 .collect()
         }
@@ -225,11 +225,11 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
             }
             Type::Pointer(s) => {
                 println!("pointer type");
-                println!("- points to: {}", NamedGoff(db, s.ty_goff));
+                println!("- points to: {}", NamedGoff(db, s.type_id));
             }
             Type::Array(s) => {
                 println!("array type");
-                println!("- element type: {}", NamedGoff(db, s.element_ty_goff));
+                println!("- element type: {}", NamedGoff(db, s.element_type_id));
                 println!("- lower bound: {}", s.lower_bound);
                 if let Some(n) = s.count {
                     println!("- count: {}", n);
@@ -252,16 +252,16 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                 if !s.template_type_parameters.is_empty() {
                     println!("- template type parameters:");
                     for ttp in &s.template_type_parameters {
-                        println!("  - {} = {}", ttp.name, NamedGoff(db, ttp.ty_goff));
+                        println!("  - {} = {}", ttp.name, NamedGoff(db, ttp.type_id));
                     }
                 }
                 if !s.members.is_empty() {
                     println!("- members:");
                     for mem in s.members.values() {
                         if let Some(name) = &mem.name {
-                            println!("  - {}: {}", name, NamedGoff(db, mem.ty_goff));
+                            println!("  - {}: {}", name, NamedGoff(db, mem.type_id));
                         } else {
-                            println!("  - <unnamed>: {}", NamedGoff(db, mem.ty_goff));
+                            println!("  - <unnamed>: {}", NamedGoff(db, mem.type_id));
                         }
                         println!("    - offset: {} bytes", mem.location);
                         if let Some(a) = mem.alignment {
@@ -286,7 +286,7 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                 if !s.template_type_parameters.is_empty() {
                     println!("- type parameters:");
                     for ttp in &s.template_type_parameters {
-                        println!("  - {} = {}", ttp.name, NamedGoff(db, ttp.ty_goff));
+                        println!("  - {} = {}", ttp.name, NamedGoff(db, ttp.type_id));
                     }
                 }
 
@@ -296,7 +296,7 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                     }
                     dwarfldr::VariantShape::One(v) => {
                         println!("- single variant enum w/o discriminator");
-                        println!("  - content type: {}", NamedGoff(db, v.member.ty_goff));
+                        println!("  - content type: {}", NamedGoff(db, v.member.type_id));
                         println!("  - offset: {} bytes", v.member.location);
                         if let Some(a) = v.member.alignment {
                             println!("  - aligned: {} bytes", a);
@@ -306,7 +306,7 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                         }
                     }
                     dwarfldr::VariantShape::Many { member, variants, .. }=> {
-                        if let Some(dname) = db.name_from_goff(member.ty_goff) {
+                        if let Some(dname) = db.type_name(member.type_id) {
                             println!("- {} variants discriminated by {} at offset {}", variants.len(), dname, member.location);
                         } else {
                             println!("- {} variants discriminated by an anonymous type at offset {}", variants.len(), member.location);
@@ -319,7 +319,7 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                         for (val, var) in variants {
                             if let Some(val) = val {
                                 println!("- when discriminator == {}", val);
-                                println!("  - contains type: {}", NamedGoff(db, var.member.ty_goff));
+                                println!("  - contains type: {}", NamedGoff(db, var.member.type_id));
                                 println!("  - at offset: {} bytes", var.member.location);
                                 if let Some(a) = var.member.alignment {
                                     println!("  - aligned: {} bytes", a);
@@ -330,7 +330,7 @@ fn cmd_info(db: &dwarfldr::Types, args: &str) {
                         for (val, var) in variants {
                             if val.is_none() {
                                 println!("- any other discriminator value");
-                                println!("  - contains type: {}", NamedGoff(db, var.member.ty_goff));
+                                println!("  - contains type: {}", NamedGoff(db, var.member.type_id));
                                 println!("  - at offset: {} bytes", var.member.location);
                                 if let Some(a) = var.member.alignment {
                                     println!("  - aligned: {} bytes", a);
@@ -411,7 +411,7 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
                 println!("{}", s.name);
             }
             Type::Array(s) => {
-                let name = db.name_from_goff(s.element_ty_goff).unwrap();
+                let name = db.type_name(s.element_type_id).unwrap();
                 if let Some(n) = s.count {
                     println!("[{}; {}]", name, n);
                 } else {
@@ -435,16 +435,16 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
                     if s.tuple_like {
                         println!("(");
                         for mem in s.members.values() {
-                            println!("    {},", db.name_from_goff(mem.ty_goff).unwrap());
+                            println!("    {},", db.type_name(mem.type_id).unwrap());
                         }
                         println!(");");
                     } else {
                         println!(" {{");
                         for mem in s.members.values() {
                             if let Some(name) = &mem.name {
-                                println!("    {}: {},", name, db.name_from_goff(mem.ty_goff).unwrap());
+                                println!("    {}: {},", name, db.type_name(mem.type_id).unwrap());
                             } else {
-                                println!("    ANON: {},", db.name_from_goff(mem.ty_goff).unwrap());
+                                println!("    ANON: {},", db.type_name(mem.type_id).unwrap());
                             }
                         }
                         println!("}}");
@@ -471,21 +471,21 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
                             print!("    ANON");
                         }
 
-                        let mty = db.type_from_goff(var.member.ty_goff)
+                        let mty = db.type_by_id(var.member.type_id)
                             .unwrap();
                         if let Type::Struct(s) = mty {
                             if !s.members.is_empty() {
                                 if s.tuple_like {
                                     println!("(");
                                     for mem in s.members.values() {
-                                        let mtn = db.name_from_goff(mem.ty_goff).unwrap();
+                                        let mtn = db.type_name(mem.type_id).unwrap();
                                         println!("        {},", mtn);
                                     }
                                     print!("    )");
                                 } else {
                                     println!(" {{");
                                     for mem in s.members.values() {
-                                        let mtn = db.name_from_goff(mem.ty_goff).unwrap();
+                                        let mtn = db.type_name(mem.type_id).unwrap();
                                         println!("        {}: {},", mem.name.as_ref().unwrap(), mtn);
                                     }
                                     print!("    }}");
@@ -505,21 +505,21 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
                                 print!("    ANON");
                             }
 
-                            let mty = db.type_from_goff(var.member.ty_goff)
+                            let mty = db.type_by_id(var.member.type_id)
                                 .unwrap();
                             if let Type::Struct(s) = mty {
                                 if !s.members.is_empty() {
                                     if s.tuple_like {
                                         println!("(");
                                         for mem in s.members.values() {
-                                            let mtn = db.name_from_goff(mem.ty_goff).unwrap();
+                                            let mtn = db.type_name(mem.type_id).unwrap();
                                             println!("        {},", mtn);
                                         }
                                         print!("    )");
                                     } else {
                                         println!(" {{");
                                         for mem in s.members.values() {
-                                            let mtn = db.name_from_goff(mem.ty_goff).unwrap();
+                                            let mtn = db.type_name(mem.type_id).unwrap();
                                             println!("        {}: {},", mem.name.as_ref().unwrap(), mtn);
                                         }
                                         print!("    }}");
@@ -548,10 +548,10 @@ fn cmd_def(db: &dwarfldr::Types, args: &str) {
             Type::Subroutine(s) => {
                 println!("fn(");
                 for &p in &s.formal_parameters {
-                    println!("    {},", db.name_from_goff(p).unwrap());
+                    println!("    {},", db.type_name(p).unwrap());
                 }
-                if let Some(rt) = s.return_ty_goff {
-                    println!(") -> {} {{", db.name_from_goff(rt).unwrap());
+                if let Some(rt) = s.return_type_id {
+                    println!(") -> {} {{", db.type_name(rt).unwrap());
                 } else {
                     println!(") {{");
                 }

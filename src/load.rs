@@ -21,9 +21,9 @@ impl<A: Load, B: Load> Load for (A, B) {
         if let Type::Struct(s) = ty {
             if s.tuple_like {
                 let m0 = s.members.get("__0").ok_or("missing __0")?;
-                let m0ty = world.type_from_goff(m0.ty_goff.into()).unwrap();
+                let m0ty = world.type_by_id(m0.type_id).unwrap();
                 let m1 = s.members.get("__1").ok_or("missing __1")?;
-                let m1ty = world.type_from_goff(m1.ty_goff.into()).unwrap();
+                let m1ty = world.type_by_id(m1.type_id).unwrap();
                 Ok((
                     A::from_buffer(
                         buffer,
@@ -139,7 +139,7 @@ impl<T: Load> Load for Vec<T> {
                     "array with non-zero lower bound not supported".into()
                 );
             }
-            let elty = world.type_from_goff(s.element_ty_goff.into()).unwrap();
+            let elty = world.type_by_id(s.element_type_id).unwrap();
 
             let elt_size = elty
                 .byte_size(world)
@@ -196,7 +196,7 @@ impl<T: Load> Load for Option<T> {
 
             let v = choose_variant(buffer, addr, world, s)?;
             let is_some = v.member.name.as_ref().unwrap() == "Some";
-            let vty = world.type_from_goff(v.member.ty_goff.into()).unwrap();
+            let vty = world.type_by_id(v.member.type_id).unwrap();
             // Option-like enums have tuple variants.
             if let Type::Struct(s) = vty {
                 if !s.tuple_like {
@@ -206,7 +206,7 @@ impl<T: Load> Load for Option<T> {
                     if s.members.len() == 1 {
                         let m = &s.members[0];
                         let mty =
-                            world.type_from_goff(m.ty_goff.into()).unwrap();
+                            world.type_by_id(m.type_id).unwrap();
                         let ma = addr + usize::try_from(m.location).unwrap();
                         Ok(Some(T::from_buffer(buffer, ma, world, mty)?))
                     } else {
@@ -242,8 +242,8 @@ pub(crate) fn choose_variant<'e>(
         VariantShape::Many {
             member, variants, ..
         } => {
-            let dty_goff = member.ty_goff;
-            let dty = world.type_from_goff(dty_goff.into()).unwrap();
+            let dtype_id = member.type_id;
+            let dty = world.type_by_id(dtype_id).unwrap();
             let da = addr + usize::try_from(member.location)?;
             let dsize = usize::try_from(dty.byte_size(world).unwrap()).unwrap();
             let d = load_unsigned(world.endian(), buffer, da, dsize);
@@ -275,7 +275,7 @@ pub(crate) fn load_unsigned(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::TypesBuilder;
+    use crate::{TypeId, TypesBuilder};
 
     #[derive(Debug, Default)]
     struct OffsetMaker {
@@ -293,20 +293,20 @@ mod test {
     fn make_option_u16(
         builder: &mut TypesBuilder,
         om: &mut OffsetMaker,
-    ) -> gimli::UnitSectionOffset {
+    ) -> TypeId {
         let u16_goff = om.next();
         builder.record_type(crate::Base {
             name: "u16".to_string(),
             encoding: Encoding::Unsigned,
             byte_size: 2,
-            offset: u16_goff,
+            offset: u16_goff.into(),
         });
 
         let none_goff = om.next();
         builder.record_type(crate::Struct {
             name: "core::option::Option<u16>::None".to_string(),
             byte_size: 4,
-            alignment: 2,
+            alignment: Some(2),
             offset: none_goff,
             tuple_like: true,
             template_type_parameters: vec![],
@@ -317,7 +317,7 @@ mod test {
         builder.record_type(crate::Struct {
             name: "core::option::Option<u16>::Some".to_string(),
             byte_size: 4,
-            alignment: 2,
+            alignment: Some(2),
             offset: some_goff,
             tuple_like: true,
             template_type_parameters: vec![],
@@ -325,10 +325,10 @@ mod test {
                 "__0".to_string() => crate::Member {
                     name: Some("__0".to_string()),
                     artificial: false,
-                    alignment: 2,
+                    alignment: Some(2),
                     location: 2,
                     offset: om.next(),
-                    ty_goff: u16_goff,
+                    type_id: u16_goff.into(),
                 },
             },
         });
@@ -337,50 +337,50 @@ mod test {
         builder.record_type(crate::Enum {
             name: "core::option::Option<u16>".to_string(),
             byte_size: 4,
-            alignment: 2,
+            alignment: Some(2),
             template_type_parameters: vec![],
             variant_part: crate::VariantPart {
-                discr: om.next(),
-                member: crate::Member {
-                    name: None,
-                    artificial: true,
-                    ty_goff: u16_goff,
-                    alignment: 2,
-                    location: 0,
-                    offset: om.next(),
-                },
                 offset: om.next(),
-                variants: indexmap::indexmap! {
-                    Some(0) => crate::Variant {
-                        discr_value: Some(0),
+                shape: VariantShape::Many {
+                    discr: om.next(),
+                    member: crate::Member {
+                        name: None,
+                        artificial: true,
+                        type_id: u16_goff.into(),
+                        alignment: Some(2),
+                        location: 0,
                         offset: om.next(),
-                        member: crate::Member {
-                            name: Some("None".to_string()),
-                            artificial: false,
-                            alignment: 2,
-                            location: 0,
-                            ty_goff: none_goff,
-                            offset: om.next(),
-                        },
                     },
-                    Some(1) => crate::Variant {
-                        discr_value: Some(1),
-                        offset: om.next(),
-                        member: crate::Member {
-                            name: Some("Some".to_string()),
-                            artificial: false,
-                            alignment: 2,
-                            location: 0,
-                            ty_goff: some_goff,
+                    variants: indexmap::indexmap! {
+                        Some(0) => crate::Variant {
                             offset: om.next(),
+                            member: crate::Member {
+                                name: Some("None".to_string()),
+                                artificial: false,
+                                alignment: Some(2),
+                                location: 0,
+                                type_id: none_goff.into(),
+                                offset: om.next(),
+                            },
+                        },
+                        Some(1) => crate::Variant {
+                            offset: om.next(),
+                            member: crate::Member {
+                                name: Some("Some".to_string()),
+                                artificial: false,
+                                alignment: Some(2),
+                                location: 0,
+                                type_id: some_goff.into(),
+                                offset: om.next(),
+                            },
                         },
                     },
                 },
             },
-            offset: option_goff,
+            offset: option_goff.into(),
         });
 
-        option_goff
+        option_goff.into()
     }
 
     #[test]
@@ -392,7 +392,7 @@ mod test {
         let option_goff = make_option_u16(&mut builder, &mut om);
 
         let world = builder.build().unwrap();
-        let oty = world.type_from_goff(option_goff).unwrap();
+        let oty = world.type_by_id(option_goff).unwrap();
 
         let img = [0, 0, 0xAB, 0xCD];
         assert_eq!(
@@ -430,15 +430,15 @@ mod test {
 
         let ary_goff = om.next();
         builder.record_type(crate::Array {
-            element_ty_goff: u8_goff,
-            index_ty_goff: index_type_goff,
+            element_type_id: TypeId(u8_goff),
+            index_type_id: TypeId(index_type_goff),
             lower_bound: 0,
             count: Some(5),
             offset: ary_goff,
         });
 
         let world = builder.build().unwrap();
-        let aty = world.type_from_goff(ary_goff).unwrap();
+        let aty = world.type_by_id(TypeId(ary_goff)).unwrap();
 
         let img = [0, 1, 2, 3, 4];
         let ary: Vec<u8> = Load::from_buffer(&img, 0, &world, aty).unwrap();
