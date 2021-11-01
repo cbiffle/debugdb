@@ -70,8 +70,10 @@ pub struct DebugDb {
     /// Mapping of text address to line number information.
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
 
+    /// All static variables, indexed by ID.
     variables: BTreeMap<VarId, StaticVariable>,
 
+    /// Index: static variables by name.
     variables_by_name: BTreeIndex<VarId, String>,
 }
 

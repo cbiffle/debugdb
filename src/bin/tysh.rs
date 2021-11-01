@@ -124,7 +124,7 @@ fn cmd_list(
     db: &debugdb::DebugDb,
     args: &str,
 ) {
-    for (goff, _) in db.types() {
+    for (goff, ty) in db.types() {
         if !args.is_empty() {
             if let Some(name) = db.type_name(goff) {
                 if !name.contains(args) {
@@ -133,7 +133,18 @@ fn cmd_list(
             }
         }
 
-        println!("{}", NamedGoff(db, goff));
+        let kind = match ty {
+            Type::Base(_) => "base",
+            Type::Struct(_) => "struct",
+            Type::Enum(_) => "enum",
+            Type::CEnum(_) => "c-enum",
+            Type::Array(_) => "array",
+            Type::Pointer(_) => "ptr",
+            Type::Union(_) => "union",
+            Type::Subroutine(_) => "subr",
+        };
+
+        println!("{:6} {}", kind, NamedGoff(db, goff));
     }
 }
 
@@ -354,8 +365,46 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                 }
             }
             Type::Union(s) => {
+                println!("union type");
+                println!("- byte size: {}", s.byte_size);
+                println!("- alignment: {}", s.alignment);
+                if !s.template_type_parameters.is_empty() {
+                    println!("- template type parameters:");
+                    for ttp in &s.template_type_parameters {
+                        println!("  - {} = {}", ttp.name, NamedGoff(db, ttp.type_id));
+                    }
+                }
+                if !s.members.is_empty() {
+                    println!("- members:");
+                    for mem in &s.members {
+                        if let Some(name) = &mem.name {
+                            println!("  - {}: {}", name, NamedGoff(db, mem.type_id));
+                        } else {
+                            println!("  - <unnamed>: {}", NamedGoff(db, mem.type_id));
+                        }
+                        println!("    - offset: {} bytes", mem.location);
+                        if let Some(a) = mem.alignment {
+                            println!("    - aligned: {} bytes", a);
+                        }
+                        if mem.artificial {
+                            println!("    - artificial");
+                        }
+                    }
+                } else {
+                    println!("- no members");
+                }
             }
             Type::Subroutine(s) => {
+                println!("subroutine type");
+                if let Some(rt) = s.return_type_id {
+                    println!("- return type: {}", NamedGoff(db, rt));
+                }
+                if !s.formal_parameters.is_empty() {
+                    println!("- formal parameters:");
+                    for &fp in &s.formal_parameters {
+                        println!("  - {}", NamedGoff(db, fp));
+                    }
+                }
             }
         }
     })
@@ -547,6 +596,25 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
                 println!("}}");
             }
             Type::Union(s) => {
+                print!("union {}", s.name);
+
+                if !s.template_type_parameters.is_empty() {
+                    print!("<");
+                    for ttp in &s.template_type_parameters {
+                        print!("{},", ttp.name);
+                    }
+                    print!(">");
+                }
+
+                println!(" {{");
+                for mem in &s.members {
+                    if let Some(name) = &mem.name {
+                        println!("    {}: {},", name, db.type_name(mem.type_id).unwrap());
+                    } else {
+                        println!("    ANON: {},", db.type_name(mem.type_id).unwrap());
+                    }
+                }
+                println!("}}");
             }
             Type::Subroutine(s) => {
                 println!("fn(");
@@ -654,7 +722,13 @@ fn cmd_addr2stack(db: &debugdb::DebugDb, args: &str) {
 }
 
 fn cmd_vars(db: &debugdb::DebugDb, args: &str) {
-    for (id, v) in db.static_variables() {
+    for (_id, v) in db.static_variables() {
+        if !args.is_empty() {
+            if !v.name.contains(args) {
+                continue;
+            }
+        }
+
         println!("0x{:0width$x} {}: {}", v.location, v.name, NamedGoff(db, v.type_id),
             width = db.pointer_size() as usize * 2);
     }
