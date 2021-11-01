@@ -116,6 +116,8 @@ static COMMANDS: &[(&str, Command, &str)] = &[
     ("alignof", cmd_alignof, "print alignment of type in bytes"),
     ("addr2line", cmd_addr2line, "look up line number information"),
     ("addr2stack", cmd_addr2stack, "display inlined stack frames"),
+    ("vars", cmd_vars, "list static variables"),
+    ("var", cmd_var, "get info on a static variable"),
 ];
 
 fn cmd_list(
@@ -648,5 +650,28 @@ fn cmd_addr2stack(db: &debugdb::DebugDb, args: &str) {
         Err(e) => {
             println!("failed: {}", e);
         }
+    }
+}
+
+fn cmd_vars(db: &debugdb::DebugDb, args: &str) {
+    for (id, v) in db.static_variables() {
+        println!("0x{:0width$x} {}: {}", v.location, v.name, NamedGoff(db, v.type_id),
+            width = db.pointer_size() as usize * 2);
+    }
+}
+
+fn cmd_var(db: &debugdb::DebugDb, args: &str) {
+    let results = db.static_variables_by_name(args).collect::<Vec<_>>();
+
+    match results.len() {
+        0 => println!("no variables found by that name"),
+        1 => (),
+        n => println!("note: {} variables found by that name", n),
+    }
+
+    for (_id, v) in results {
+        println!("{} @ {}", v.name, Goff(v.offset));
+        println!("- type: {}", NamedGoff(db, v.type_id));
+        println!("- address: 0x{:x}", v.location);
     }
 }

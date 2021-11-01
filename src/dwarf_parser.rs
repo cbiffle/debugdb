@@ -3,7 +3,7 @@
 //! This consumes DWARF debug info sections by recursive descent, building up
 //! our data model.
 
-use crate::{DebugDbBuilder, RtSlice, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine};
+use crate::{DebugDbBuilder, RtSlice, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine, StaticVariable};
 use indexmap::IndexMap;
 use std::borrow::Cow;
 use std::num::NonZeroU64;
@@ -72,6 +72,9 @@ fn handle_nested_types(
             }
             gim_con::DW_TAG_subprogram => {
                 parse_subprogram(dwarf, unit, cursor, builder)?;
+            }
+            gim_con::DW_TAG_variable => {
+                parse_static_variable(dwarf, unit, cursor, builder)?;
             }
             _ => {
                 skip_entry(cursor)?;
@@ -1442,3 +1445,136 @@ fn parse_inlined_subroutine(
         formal_parameters,
     })
 }
+
+fn parse_static_variable(
+    dwarf: &gimli::Dwarf<RtSlice<'_>>,
+    unit: &gimli::Unit<RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    builder: &mut DebugDbBuilder,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let entry = cursor.current().unwrap();
+    assert!(entry.tag() == gim_con::DW_TAG_variable);
+
+    let mut name = None;
+    let mut linkage_name = None;
+    let mut type_id = None;
+    let mut decl = DeclCoord::default();
+    let mut location = None;
+
+    let offset = entry.offset().to_unit_section_offset(unit);
+
+    let mut attrs = entry.attrs();
+    while let Some(attr) = attrs.next()? {
+        match attr.name() {
+            gim_con::DW_AT_name => {
+                name = Some(get_attr_string(dwarf, attr.value())?);
+            }
+            gim_con::DW_AT_linkage_name => {
+                linkage_name = Some(get_attr_string(dwarf, attr.value())?);
+            }
+            gim_con::DW_AT_location => {
+                let e = attr.exprloc_value().unwrap();
+                let mut eval = e.evaluation(unit.encoding());
+                let mut result = eval.evaluate()?;
+                loop {
+                    match result {
+                        gimli::EvaluationResult::Complete => {
+                            let r = eval.result();
+                            if r.len() == 1 {
+                                match r[0].location {
+                                    gimli::Location::Address { address } => {
+                                        location = Some(address);
+                                        break;
+                                    }
+                                    x => {
+                                        panic!("unexpected static location: {:?}", x);
+                                    }
+                                }
+                            } else {
+                                panic!("unexpected eval results: {:?}", r);
+                            }
+                        }
+                        gimli::EvaluationResult::RequiresRelocatedAddress(a) => {
+                            result = eval.resume_with_relocated_address(a)?;
+
+                        }
+                        x => {
+                            println!("unhandled location expression at {:x?}: {:?}", offset, x);
+                            return Ok(())
+                        }
+                    } 
+                }
+            }
+            gim_con::DW_AT_type => {
+                if let gimli::AttributeValue::UnitRef(o) = attr.value() {
+                    type_id = Some(o.to_unit_section_offset(&unit));
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
+                    type_id = Some(o.into());
+                } else {
+                    panic!("unexpected type type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_file => {
+                if let gimli::AttributeValue::FileIndex(f) = attr.value() {
+                    if let Some(lp) = &unit.line_program {
+                        if let Some(fent) = lp.header().file(f) {
+                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            if let Some(dv) = fent.directory(lp.header()) {
+                                decl.file = Some(format!(
+                                    "{}/{}",
+                                    get_attr_string(dwarf, dv)?,
+                                    file,
+                                ));
+                            } else {
+                                decl.file = Some(file.into_owned());
+                            }
+                        } else {
+                            eprintln!("WARN: invalid file index");
+                        }
+                    } else {
+                        eprintln!("WARN: missing line program");
+                    }
+                } else {
+                    eprintln!("WARN: unexpected call_file type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_line => {
+                decl.line = NonZeroU64::new(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_decl_column => {
+                decl.column = NonZeroU64::new(attr.value().udata_value().unwrap());
+            }
+            _ => {
+                //println!("skipping static var attr: {:x?}", attr.name());
+            }
+        }
+    }
+
+    if location.is_none() {
+        // skip!
+        return Ok(());
+    }
+
+    let type_id = TypeId(type_id.unwrap());
+    let location = location.unwrap();
+
+    let name = if linkage_name.is_none() {
+        // This is a heuristic for detecting #[no_mangle] Rust variables.
+        name.unwrap().into_owned()
+    } else {
+        builder.format_path(name.unwrap())
+    };
+
+
+    builder.record_variable(StaticVariable {
+        offset,
+        name,
+        type_id,
+        decl,
+        location,
+    });
+    Ok(())
+}
+

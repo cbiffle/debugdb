@@ -1,3 +1,6 @@
+//! Collects debug information from a program into a queryable, cross-referenced
+//! form.
+
 pub mod load;
 pub mod value;
 pub mod model;
@@ -66,6 +69,10 @@ pub struct DebugDb {
 
     /// Mapping of text address to line number information.
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
+
+    variables: BTreeMap<VarId, StaticVariable>,
+
+    variables_by_name: BTreeIndex<VarId, String>,
 }
 
 impl DebugDb {
@@ -266,6 +273,20 @@ impl DebugDb {
         Ok(frag)
     }
 
+    /// Returns an iterator over all static variables defined in this program.
+    pub fn static_variables(
+        &self,
+    ) -> impl Iterator<Item = (VarId, &StaticVariable)> + '_ {
+        self.variables.iter().map(|(&goff, ty)| (goff, ty))
+    }
+
+    pub fn static_variables_by_name(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = (VarId, &StaticVariable)> + '_ {
+        self.consult_index_generic(&self.variables_by_name, name, &self.variables)
+    }
+
     /// Looks up `key` in `index`, and then transforms the result by (1) copying
     /// the goffs and (2) attaching the associated `Type` to each item.
     fn consult_index<'d, K, Q>(
@@ -274,13 +295,29 @@ impl DebugDb {
         key: &Q,
     ) -> impl Iterator<Item = (TypeId, &'d Type)> + 'd
         where K: std::borrow::Borrow<Q> + Ord,
+              Q: Ord + ?Sized + 'd,
+    {
+        self.consult_index_generic(index, key, &self.types)
+    }
+
+    /// Looks up `key` in `index`, and then transforms the result by (1) copying
+    /// the goffs and (2) attaching the associated `Type` to each item.
+    fn consult_index_generic<'d, I, K, Q, E>(
+        &'d self,
+        index: &'d BTreeIndex<I, K>,
+        key: &Q,
+        lookup: &'d BTreeMap<I, E>,
+    ) -> impl Iterator<Item = (I, &'d E)> + 'd
+        where K: std::borrow::Borrow<Q> + Ord,
               Q: Ord + ?Sized,
+              I: Copy + Eq + Ord,
+              E: 'd,
     {
         index
             .get(key)
             .into_iter()
             .flat_map(move |set| {
-                set.iter().map(move |&goff| (goff, &self.types[&goff]))
+                set.iter().map(move |&goff| (goff, &lookup[&goff]))
             })
     }
 }
@@ -300,6 +337,7 @@ pub struct DebugDbBuilder {
 
     subprograms: BTreeMap<ProgramId, Subprogram>,
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
+    variables: BTreeMap<VarId, StaticVariable>,
 }
 
 impl DebugDbBuilder {
@@ -313,6 +351,7 @@ impl DebugDbBuilder {
             types: BTreeMap::new(),
             subprograms: BTreeMap::new(),
             line_table: BTreeMap::new(),
+            variables: BTreeMap::new(),
         }
     }
 
@@ -415,6 +454,8 @@ impl DebugDbBuilder {
             ind
         };
 
+        let variables_by_name = index_by_key(&self.variables, |_, v| Some(v.name.clone()));
+
         fn check_inl(inl: &InlinedSubroutine) -> Result<(), Box<dyn std::error::Error>> {
             if inl.abstract_origin.is_none() {
                 return Err(format!("inlined subroutine w/o abstract origin at {:?}", inl.offset).into());
@@ -431,15 +472,18 @@ impl DebugDbBuilder {
                 check_inl(inl)?;
             }
         }
+
         Ok(DebugDb {
             endian: self.endian,
             types: self.types,
             is_64: self.is_64,
             subprograms: self.subprograms,
             line_table: self.line_table,
+            variables: self.variables,
             type_name_index,
             array_index,
             subroutine_index,
+            variables_by_name,
         })
     }
 
@@ -454,6 +498,10 @@ impl DebugDbBuilder {
 
     pub fn record_subprogram(&mut self, t: Subprogram) {
         self.subprograms.insert(ProgramId(t.offset), t);
+    }
+
+    pub fn record_variable(&mut self, t: StaticVariable) {
+        self.variables.insert(VarId(t.offset), t);
     }
 
     pub fn record_line_table_row(&mut self, addr: u64, r: LineNumberRow) {

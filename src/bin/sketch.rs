@@ -240,8 +240,8 @@ fn dump_file<'a>(
 
         println!("- decl: {}:{}:{}",
             sp.decl_coord.file.as_deref().unwrap_or("????"),
-            sp.decl_coord.line.unwrap_or(0),
-            sp.decl_coord.column.unwrap_or(0),
+            sp.decl_coord.line.map(|x| x.get()).unwrap_or(0),
+            sp.decl_coord.column.map(|x| x.get()).unwrap_or(0),
             );
         if let Some(rt) = sp.return_type_id {
             println!("- returns: {}",
@@ -267,8 +267,8 @@ fn dump_file<'a>(
                 }
                 println!("    - decl: {}:{}:{}",
                     p.decl_coord.file.as_deref().unwrap_or("????"),
-                    p.decl_coord.line.unwrap_or(0),
-                    p.decl_coord.column.unwrap_or(0),
+                    p.decl_coord.line.map(|x| x.get()).unwrap_or(0),
+                    p.decl_coord.column.map(|x| x.get()).unwrap_or(0),
                 );
                 if let Some(t) = p.type_id {
                     println!("    - type: {}",
@@ -317,8 +317,8 @@ fn print_inlined_subroutine(everything: &debugdb::DebugDb, is: &debugdb::Inlined
     println!("{:indent$}  - call: {}:{}:{}",
         "",
         is.call_coord.file.as_deref().unwrap_or("????"),
-        is.call_coord.line.unwrap_or(0),
-        is.call_coord.column.unwrap_or(0),
+        is.call_coord.line.map(|x| x.get()).unwrap_or(0),
+        is.call_coord.column.map(|x| x.get()).unwrap_or(0),
         indent = indent
     );
     println!("{:indent$}  - PC ranges:", "", indent = indent);
@@ -337,8 +337,8 @@ fn print_inlined_subroutine(everything: &debugdb::DebugDb, is: &debugdb::Inlined
             println!("{:indent$}      - decl: {}:{}:{}",
                 "",
                 p.decl_coord.file.as_deref().unwrap_or("????"),
-                p.decl_coord.line.unwrap_or(0),
-                p.decl_coord.column.unwrap_or(0),
+                p.decl_coord.line.map(|x| x.get()).unwrap_or(0),
+                p.decl_coord.column.map(|x| x.get()).unwrap_or(0),
                 indent = indent,
             );
             if let Some(t) = p.type_id {

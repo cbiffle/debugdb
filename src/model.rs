@@ -31,6 +31,16 @@ impl From<gimli::UnitSectionOffset> for ProgramId {
     }
 }
 
+/// Identifies a static variable.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct VarId(pub gimli::UnitSectionOffset);
+
+impl From<gimli::UnitSectionOffset> for VarId {
+    fn from(x: gimli::UnitSectionOffset) -> Self {
+        Self(x)
+    }
+}
+
 /// Information about a type from a program.
 ///
 /// There are many kinds of types; this enum distinguishes between them.
@@ -593,4 +603,19 @@ pub struct PcInfo {
     pub line: Option<NonZeroU64>,
     /// Column number of code being run, if available.
     pub column: Option<NonZeroU64>,
+}
+
+/// A static variable with a fixed address.
+#[derive(Clone, Debug)]
+pub struct StaticVariable {
+    /// Name of variable.
+    pub name: String,
+    /// Type contained in variable.
+    pub type_id: TypeId,
+    /// Location of variable declaration.
+    pub decl: DeclCoord,
+    /// Address in memory.
+    pub location: u64,
+    /// Location in debug info.
+    pub offset: gimli::UnitSectionOffset,
 }
