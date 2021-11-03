@@ -75,6 +75,9 @@ pub struct DebugDb {
 
     /// Index: static variables by name.
     variables_by_name: BTreeIndex<VarId, String>,
+
+    /// All entities with fixed addresses, indexed by base address.
+    entities_by_address: BTreeMap<u64, Vec<AddressRange>>,
 }
 
 impl DebugDb {
@@ -282,11 +285,28 @@ impl DebugDb {
         self.variables.iter().map(|(&goff, ty)| (goff, ty))
     }
 
+    pub fn static_variable_by_id(
+        &self,
+        id: VarId,
+    ) -> Option<&StaticVariable> {
+        self.variables.get(&id)
+    }
+
     pub fn static_variables_by_name(
         &self,
         name: &str,
     ) -> impl Iterator<Item = (VarId, &StaticVariable)> + '_ {
         self.consult_index_generic(&self.variables_by_name, name, &self.variables)
+    }
+
+    pub fn entities_by_address(
+        &self,
+        address: u64,
+    ) -> impl Iterator<Item = &AddressRange> + '_ {
+        self.entities_by_address.range(..=address)
+            .rev()
+            .flat_map(|(_, rec)| rec)
+            .filter(move |rec| rec.range.contains(&address))
     }
 
     /// Looks up `key` in `index`, and then transforms the result by (1) copying
@@ -458,6 +478,34 @@ impl DebugDbBuilder {
 
         let variables_by_name = index_by_key(&self.variables, |_, v| Some(v.name.clone()));
 
+        // Build address map.
+        let mut entities_by_address: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for (&vid, v) in &self.variables {
+            let t = &self.types[&v.type_id];
+            let sz = t.byte_size_early(
+                self.encoding.address_size as u64,
+                |t| self.types.get(&t),
+            );
+            if let Some(sz) = sz {
+                entities_by_address.entry(v.location)
+                    .or_default()
+                    .push(AddressRange {
+                        range: v.location..v.location + sz,
+                        entity: EntityId::Var(vid),
+                    });
+            }
+        }
+        for (&pid, p) in &self.subprograms {
+            if let Some(pc_range) = p.pc_range.clone() {
+                entities_by_address.entry(pc_range.start)
+                    .or_default()
+                    .push(AddressRange {
+                        range: pc_range,
+                        entity: EntityId::Prog(pid),
+                    });
+            }
+        }
+
         fn check_inl(inl: &InlinedSubroutine) -> Result<(), Box<dyn std::error::Error>> {
             if inl.abstract_origin.is_none() {
                 return Err(format!("inlined subroutine w/o abstract origin at {:?}", inl.offset).into());
@@ -486,6 +534,7 @@ impl DebugDbBuilder {
             array_index,
             subroutine_index,
             variables_by_name,
+            entities_by_address,
         })
     }
 
@@ -648,3 +697,14 @@ pub fn parse_file<'a>(
     builder.build()
 }
 
+#[derive(Clone, Debug)]
+pub struct AddressRange {
+    pub range: std::ops::Range<u64>,
+    pub entity: EntityId,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum EntityId {
+    Var(VarId),
+    Prog(ProgramId),
+}

@@ -96,24 +96,57 @@ impl Type {
         }
     }
 
-    /// Determines the size of the type, in bytes.
+    /// Determines the inherent size of the type, in bytes. The inherent size is
+    /// the size that can be computed without referring to the debug information
+    /// of other types.
     ///
-    /// Not all types have sizes.
-    pub fn byte_size(&self, world: &DebugDb) -> Option<u64> {
+    /// Not all types have sizes; even fewer have inherent sizes. This is an
+    /// implementation detail of the full `byte_size` algorithm.
+    pub fn inherent_byte_size(&self) -> Option<u64> {
         match self {
             Self::Struct(s) => Some(s.byte_size),
             Self::Enum(s) => Some(s.byte_size),
             Self::Base(s) => Some(s.byte_size),
             Self::CEnum(s) => Some(s.byte_size),
             Self::Union(s) => Some(s.byte_size),
-            Self::Array(a) => {
-                let eltty = world.type_by_id(a.element_type_id)?;
-                let eltsize = eltty.byte_size(world)?;
-                Some(a.count? * eltsize)
-            }
-            Self::Pointer(_) => Some(world.pointer_size()),
+            Self::Array(_) => None,
+            Self::Pointer(_) => None,
             Self::Subroutine(_) => None,
         }
+    }
+
+    pub(crate) fn byte_size_early<'a>(
+        &'a self,
+        pointer_size: u64,
+        lookup_type: impl Fn(TypeId) -> Option<&'a Type>,
+    ) -> Option<u64> {
+        let mut factor = 1;
+        let mut t = self;
+        loop {
+            match t.inherent_byte_size() {
+                Some(x) => break Some(factor * x),
+                None => match t {
+                    Self::Array(a) => {
+                        factor *= a.count?;
+                        t = lookup_type(a.element_type_id)?;
+                    }
+                    Self::Pointer(_) => break Some(factor * pointer_size),
+                    Self::Subroutine(_) => break None,
+
+                    _ => panic!("inconsistency btw byte_size_early and inherent_byte_size"),
+                },
+            }
+        }
+    }
+
+    /// Determines the size of the type, in bytes.
+    ///
+    /// Not all types have sizes.
+    pub fn byte_size(&self, world: &DebugDb) -> Option<u64> {
+        self.byte_size_early(
+            world.pointer_size(),
+            |t| world.type_by_id(t),
+        )
     }
 
     /// Determines the name of the type.

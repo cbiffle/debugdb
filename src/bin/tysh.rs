@@ -114,6 +114,7 @@ static COMMANDS: &[(&str, Command, &str)] = &[
     ("def", cmd_def, "print a type as a pseudo-Rust definition"),
     ("sizeof", cmd_sizeof, "print size of type in bytes"),
     ("alignof", cmd_alignof, "print alignment of type in bytes"),
+    ("addr", cmd_addr, "look up information about an address"),
     ("addr2line", cmd_addr2line, "look up line number information"),
     ("addr2stack", cmd_addr2stack, "display inlined stack frames"),
     ("vars", cmd_vars, "list static variables"),
@@ -747,5 +748,135 @@ fn cmd_var(db: &debugdb::DebugDb, args: &str) {
         println!("{} @ {}", v.name, Goff(v.offset));
         println!("- type: {}", NamedGoff(db, v.type_id));
         println!("- address: 0x{:x}", v.location);
+    }
+}
+
+fn cmd_addr(db: &debugdb::DebugDb, args: &str) {
+    let addr = if args.starts_with("0x") {
+        if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
+            a
+        } else {
+            println!("can't parse {} as an address", args);
+            return;
+        }
+    } else if let Ok(a) = args.parse::<u64>() {
+        a
+    } else {
+        println!("can't parse {} as an address", args);
+        return;
+    };
+
+    let es = db.entities_by_address(addr).collect::<Vec<_>>();
+
+    match es.len() {
+        0 => println!("Nothing known about address 0x{:x}.", addr),
+        1 => (),
+        n => println!("note: {} overlapping entities claim address 0x{:x}", n, addr),
+    }
+
+    let bold = ansi_term::Style::new().bold();
+    let dim = ansi_term::Style::new().dimmed();
+
+    for e in es {
+        let offset = addr - e.range.start;
+        print!("Offset +0x{:x} into ", offset);
+        match e.entity {
+            debugdb::EntityId::Var(vid) => {
+                let v = db.static_variable_by_id(vid).unwrap();
+                println!("static {}", bold.paint(&v.name));
+                println!("- range 0x{:x}..0x{:x}", 
+                    e.range.start, e.range.end);
+                println!("- type {}", NamedGoff(db, v.type_id));
+
+                // Try to determine path within type.
+                offset_to_path(db, v.type_id, offset);
+            }
+            debugdb::EntityId::Prog(pid) => {
+                let p = db.subprogram_by_id(pid).unwrap();
+                if let Some(n) = &p.name {
+                    println!("subprogram {}", bold.paint(n));
+                } else {
+                    println!("subprogram {}", bold.paint("ANON"));
+                }
+                println!("- range 0x{:x}..0x{:x}", 
+                    e.range.start, e.range.end);
+                match db.static_stack_for_pc(addr) {
+                    Ok(trc) => {
+                        println!("- stack fragment with inlines:");
+                        for (i, record) in trc.iter().rev().enumerate() {
+                            let subp = db.subprogram_by_id(record.subprogram).unwrap();
+
+                            print!("    {:4}   ", i);
+                            if let Some(n) = &subp.name {
+                                println!("{}", bold.paint(n));
+                            } else {
+                                println!("{}", bold.paint("<unknown-subprogram>"));
+                            }
+                            print!("{}", dim.prefix());
+                            print!("        {}:", record.file);
+                            if let Some(line) = record.line {
+                                print!("{}:", line);
+                            } else {
+                                print!("?:");
+                            }
+                            if let Some(col) = record.column {
+                                print!("{}", col);
+                            } else {
+                                print!("?");
+                            }
+                            print!("{}", dim.suffix());
+                            println!();
+                        }
+                    }
+                    Err(e) => {
+                        println!("- could not get stack fragment: {}", e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn offset_to_path(
+    db: &debugdb::DebugDb,
+    tid: TypeId,
+    offset: u64,
+) {
+    let t = db.type_by_id(tid).unwrap();
+    match t {
+        Type::Array(a) => {
+            let et = db.type_by_id(a.element_type_id).unwrap();
+            if let Some(esz) = et.byte_size(db) {
+                if esz > 0 {
+                    let index = offset / esz;
+                    let new_offset = offset % esz;
+                    println!("  - index [{}] +0x{:x}", index, new_offset);
+                    offset_to_path(db, a.element_type_id, new_offset);
+                }
+            }
+        }
+        Type::Struct(s) => {
+            // This is where an offsetof-to-member index would be convenient
+
+            for m in s.members.values() {
+                if offset < m.location {
+                    continue;
+                }
+                let new_offset = offset - m.location;
+                let mt = db.type_by_id(m.type_id).unwrap();
+                if let Some(msz) = mt.byte_size(db) {
+                    if msz > 0 {
+                        if let Some(n) = &m.name {
+                            println!("  - .{} +0x{:x} (in {})", n, new_offset, s.name);
+                        } else {
+                            return;
+                        }
+                        offset_to_path(db, m.type_id, new_offset);
+                        break;
+                    }
+                }
+            }
+        }
+        _ => (),
     }
 }
