@@ -12,6 +12,7 @@ pub use self::model::*;
 use object::{Object, ObjectSection};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 // Internal type abbreviations
 type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
@@ -22,7 +23,7 @@ type BTreeIndex<I, K> = BTreeMap<K, BTreeSet<I>>;
 /// This is primarily focused on correctly representing Rust programs, but it
 /// can represent a large subset of C types as a side effect -- currently only
 /// unnamed types present a problem. This could be fixed.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DebugDb {
     /// Endianness of the target system.
     endian: gimli::RunTimeEndian,
@@ -78,6 +79,9 @@ pub struct DebugDb {
 
     /// All entities with fixed addresses, indexed by base address.
     entities_by_address: BTreeMap<u64, Vec<AddressRange>>,
+
+    // TODO
+    pub debug_frame: gimli::DebugFrame<gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>>,
 }
 
 impl DebugDb {
@@ -356,6 +360,7 @@ pub struct DebugDbBuilder {
     endian: gimli::RunTimeEndian,
     is_64: bool,
     types: BTreeMap<TypeId, Type>,
+    debug_frame: gimli::DebugFrame<gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>>,
 
     subprograms: BTreeMap<ProgramId, Subprogram>,
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
@@ -365,11 +370,16 @@ pub struct DebugDbBuilder {
 impl DebugDbBuilder {
     /// Creates a new `DebugDbBuilder` for information from a program with the
     /// given endianness and pointer width.
-    pub fn new(endian: gimli::RunTimeEndian, is_64: bool) -> Self {
+    pub fn new(
+        endian: gimli::RunTimeEndian,
+        is_64: bool,
+        debug_frame: gimli::DebugFrame<gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>>,
+    ) -> Self {
         Self {
             endian,
             path: vec![],
             is_64,
+            debug_frame,
             types: BTreeMap::new(),
             subprograms: BTreeMap::new(),
             line_table: BTreeMap::new(),
@@ -483,7 +493,7 @@ impl DebugDbBuilder {
         for (&vid, v) in &self.variables {
             let t = &self.types[&v.type_id];
             let sz = t.byte_size_early(
-                self.encoding.address_size as u64,
+                if self.is_64 { 8 } else { 4 },
                 |t| self.types.get(&t),
             );
             if let Some(sz) = sz {
@@ -530,6 +540,7 @@ impl DebugDbBuilder {
             subprograms: self.subprograms,
             line_table: self.line_table,
             variables: self.variables,
+            debug_frame: self.debug_frame,
             type_name_index,
             array_index,
             subroutine_index,
@@ -635,9 +646,14 @@ pub fn parse_file<'a>(
     let dwarf =
         dwarf_cow.borrow(|section| gimli::EndianSlice::new(section, endian));
 
-    let mut iter = dwarf.units();
-    let mut builder = DebugDbBuilder::new(endian, object.is_64());
+    use gimli::Section;
+    let debug_frame: gimli::DebugFrame<gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>> = gimli::DebugFrame::load(
+        |id| Ok::<_, gimli::Error>(gimli::EndianReader::new(Arc::from(&*load_section(id)?), endian)),
+    )?;
 
+    let mut builder = DebugDbBuilder::new(endian, object.is_64(), debug_frame);
+
+    let mut iter = dwarf.units();
     while let Some(header) = iter.next()? {
         let unit = dwarf.unit(header)?;
 

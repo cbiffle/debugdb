@@ -119,6 +119,7 @@ static COMMANDS: &[(&str, Command, &str)] = &[
     ("addr2stack", cmd_addr2stack, "display inlined stack frames"),
     ("vars", cmd_vars, "list static variables"),
     ("var", cmd_var, "get info on a static variable"),
+    ("unwind", cmd_unwind, "get unwind info for an address"),
 ];
 
 fn cmd_list(
@@ -880,3 +881,66 @@ fn offset_to_path(
         _ => (),
     }
 }
+
+fn cmd_unwind(db: &debugdb::DebugDb, args: &str) {
+    let addr = if args.starts_with("0x") {
+        if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
+            a
+        } else {
+            println!("can't parse {} as an address", args);
+            return;
+        }
+    } else if let Ok(a) = args.parse::<u64>() {
+        a
+    } else {
+        println!("can't parse {} as an address", args);
+        return;
+    };
+
+    use gimli::UnwindSection;
+    let mut ctx = gimli::UnwindContext::new();
+    let bases = gimli::BaseAddresses::default();
+    match db.debug_frame.unwind_info_for_address(&bases, &mut ctx, addr, gimli::DebugFrame::cie_from_offset) {
+        Ok(ui) => {
+            println!("saved args: {} bytes", ui.saved_args_size());
+            print!("cfa: ");
+            match ui.cfa() {
+                gimli::CfaRule::RegisterAndOffset { register, offset } => {
+                    println!("reg #{}, offset {}", register.0, offset);
+                }
+                other => panic!("unsupported CFA rule type: {:?}", other),
+            }
+            for (n, rule) in ui.registers() {
+                print!("  caller reg #{} ", n.0);
+                match rule {
+                    gimli::RegisterRule::Offset(n) => {
+                        if *n < 0 {
+                            println!("at CFA-{}", -n);
+                        } else {
+                            println!("at CFA+{}", n);
+                        }
+                    }
+                    gimli::RegisterRule::ValOffset(n) => {
+                        if *n < 0 {
+                            println!("= CFA-{}", -n);
+                        } else {
+                            println!("= CFA+{}", n);
+                        }
+                    }
+                    gimli::RegisterRule::SameValue => {
+                        println!("preserved");
+                    }
+                    gimli::RegisterRule::Register(n) => {
+                        println!("in reg# {}", n.0);
+                    }
+                    _ => println!("{:?}", rule),
+                }
+            }
+        }
+        Err(e) => {
+            println!("failed: {}", e);
+        }
+    }
+}
+
+
