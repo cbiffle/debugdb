@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 // Internal type abbreviations
-type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
 type BTreeIndex<I, K> = BTreeMap<K, BTreeSet<I>>;
 
 /// A database of information extracted from the debug info of a program.

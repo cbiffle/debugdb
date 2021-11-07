@@ -3,12 +3,15 @@
 //! This consumes DWARF debug info sections by recursive descent, building up
 //! our data model.
 
-use crate::{DebugDbBuilder, RtSlice, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine, StaticVariable};
+use crate::{DebugDbBuilder, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine, StaticVariable};
 use indexmap::IndexMap;
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 
 use gimli::constants as gim_con;
+
+// Internal type abbreviations
+type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
 
 pub fn parse_entry(
     dwarf: &gimli::Dwarf<RtSlice<'_>>,
