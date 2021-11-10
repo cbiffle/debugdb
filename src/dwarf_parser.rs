@@ -3,20 +3,16 @@
 //! This consumes DWARF debug info sections by recursive descent, building up
 //! our data model.
 
-use crate::{DebugDbBuilder, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine, StaticVariable};
+use crate::{DebugDbBuilder, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, RtArcReader, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine, StaticVariable};
 use indexmap::IndexMap;
-use std::borrow::Cow;
 use std::num::NonZeroU64;
 
 use gimli::constants as gim_con;
 
-// Internal type abbreviations
-type RtSlice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
-
 pub fn parse_entry(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -42,9 +38,9 @@ pub fn parse_entry(
 /// Factored out of parsers for DWARF entities that can contain types. This
 /// dispatches between the type or namespace parsing routines based on tag.
 fn handle_nested_types(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(child) = cursor.current() {
@@ -89,9 +85,9 @@ fn handle_nested_types(
 }
 
 fn parse_namespace(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -127,9 +123,9 @@ fn parse_namespace(
 }
 
 fn parse_base_type(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -169,7 +165,7 @@ fn parse_base_type(
         }
     }
 
-    let name = name.unwrap().into_owned();
+    let name = name.unwrap();
     let byte_size = byte_size.unwrap();
     let encoding = encoding.unwrap();
 
@@ -183,9 +179,9 @@ fn parse_base_type(
 }
 
 fn parse_structure_type(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -313,9 +309,9 @@ fn parse_structure_type(
 }
 
 fn parse_template_type_parameter(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<TemplateTypeParameter, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_template_type_parameter);
@@ -351,9 +347,9 @@ fn parse_template_type_parameter(
 }
 
 fn parse_member(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<Member, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_member);
@@ -413,9 +409,9 @@ fn parse_member(
 }
 
 fn parse_variant_part(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<VariantShape, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_variant_part);
@@ -491,9 +487,9 @@ fn parse_variant_part(
 }
 
 fn parse_variant(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<(Option<u64>, Variant), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_variant);
@@ -541,9 +537,9 @@ fn parse_variant(
 }
 
 fn parse_enumeration_type(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -613,9 +609,9 @@ fn parse_enumeration_type(
 }
 
 fn parse_enumerator(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<Enumerator, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_enumerator);
@@ -643,7 +639,7 @@ fn parse_enumerator(
         }
     }
 
-    let name = name.unwrap().into_owned();
+    let name = name.unwrap();
     let const_value = const_value.unwrap();
 
     Ok(Enumerator {
@@ -654,9 +650,9 @@ fn parse_enumerator(
 }
 
 fn parse_array_type(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -716,9 +712,9 @@ fn parse_array_type(
 }
 
 fn parse_subrange_type(
-    _dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    _dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<
     (TypeId, u64, Option<u64>),
     Box<dyn std::error::Error>,
@@ -774,9 +770,9 @@ fn parse_subrange_type(
 }
 
 fn parse_pointer_type(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -815,7 +811,7 @@ fn parse_pointer_type(
         return Ok(());
     }
 
-    let name = name.unwrap().into_owned();
+    let name = name.unwrap();
     let type_id = TypeId(type_id.unwrap());
 
     if entry.has_children() {
@@ -841,9 +837,9 @@ fn parse_pointer_type(
 }
 
 fn parse_union_type(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -919,9 +915,9 @@ fn parse_union_type(
 }
 
 fn parse_subroutine_type(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -977,9 +973,9 @@ fn parse_subroutine_type(
 }
 
 fn parse_formal_parameter(
-    _dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    _dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<TypeId, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
@@ -1010,26 +1006,26 @@ fn parse_formal_parameter(
 }
 
 fn get_attr_string<'a>(
-    dwarf: &'a gimli::Dwarf<RtSlice<'_>>,
-    attrval: gimli::AttributeValue<RtSlice<'_>>,
-) -> Result<Cow<'a, str>, Box<dyn std::error::Error>> {
+    dwarf: &'a gimli::Dwarf<RtArcReader>,
+    attrval: gimli::AttributeValue<RtArcReader>,
+) -> Result<String, Box<dyn std::error::Error>> {
     match attrval {
         gimli::AttributeValue::DebugStrRef(offset) => {
             if let Ok(s) = dwarf.debug_str.get_str(offset) {
-                Ok(s.to_string_lossy())
+                Ok(String::from_utf8_lossy(s.bytes()).into_owned())
             } else {
-                Ok(format!("<.debug_str+0x{:08x}>", offset.0).into())
+                Ok(format!("<.debug_str+0x{:08x}>", offset.0))
             }
         }
         gimli::AttributeValue::String(data) => {
-            Ok(data.to_string_lossy().into_owned().into()) // TODO hack
+            Ok(String::from_utf8_lossy(data.bytes()).into_owned()) // TODO hack
         }
         _ => Err(format!("expected string, got: {:?}", attrval).into()),
     }
 }
 
 fn skip_entry(
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
 
@@ -1059,9 +1055,9 @@ fn skip_entry(
 }
 
 fn parse_subprogram(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -1082,7 +1078,7 @@ fn parse_subprogram(
                 name = Some(get_attr_string(dwarf, attr.value())?);
             }
             gim_con::DW_AT_linkage_name => {
-                linkage_name = Some(get_attr_string(dwarf, attr.value())?.into_owned());
+                linkage_name = Some(get_attr_string(dwarf, attr.value())?);
             }
             gim_con::DW_AT_noreturn => match attr.value() {
                 gimli::AttributeValue::Flag(f) => {
@@ -1102,7 +1098,7 @@ fn parse_subprogram(
                                     file,
                                 ));
                             } else {
-                                decl_coord.file = Some(file.into_owned());
+                                decl_coord.file = Some(file);
                             }
                         } else {
                             eprintln!("WARN: invalid file index");
@@ -1226,9 +1222,9 @@ fn parse_subprogram(
 }
 
 fn parse_sub_parameter(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<SubParameter, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
@@ -1243,7 +1239,7 @@ fn parse_sub_parameter(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?.into_owned());
+                name = Some(get_attr_string(dwarf, attr.value())?);
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
@@ -1279,7 +1275,7 @@ fn parse_sub_parameter(
                                     file,
                                 ));
                             } else {
-                                decl_coord.file = Some(file.into_owned());
+                                decl_coord.file = Some(file);
                             }
                         } else {
                             eprintln!("WARN: invalid file index");
@@ -1320,9 +1316,9 @@ fn parse_sub_parameter(
 }
 
 fn parse_inlined_subroutine(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<InlinedSubroutine, Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_inlined_subroutine);
@@ -1359,7 +1355,7 @@ fn parse_inlined_subroutine(
                                     file,
                                 ));
                             } else {
-                                call_coord.file = Some(file.into_owned());
+                                call_coord.file = Some(file);
                             }
                         } else {
                             eprintln!("WARN: invalid file index");
@@ -1450,9 +1446,9 @@ fn parse_inlined_subroutine(
 }
 
 fn parse_static_variable(
-    dwarf: &gimli::Dwarf<RtSlice<'_>>,
-    unit: &gimli::Unit<RtSlice<'_>>,
-    cursor: &mut gimli::EntriesCursor<'_, '_, RtSlice<'_>>,
+    dwarf: &gimli::Dwarf<RtArcReader>,
+    unit: &gimli::Unit<RtArcReader>,
+    cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
@@ -1484,9 +1480,9 @@ fn parse_static_variable(
                         gimli::EvaluationResult::Complete => {
                             let r = eval.result();
                             if r.len() == 1 {
-                                match r[0].location {
+                                match &r[0].location {
                                     gimli::Location::Address { address } => {
-                                        location = Some(address);
+                                        location = Some(*address);
                                         break;
                                     }
                                     x => {
@@ -1531,7 +1527,7 @@ fn parse_static_variable(
                                     file,
                                 ));
                             } else {
-                                decl.file = Some(file.into_owned());
+                                decl.file = Some(file);
                             }
                         } else {
                             eprintln!("WARN: invalid file index");
@@ -1565,7 +1561,7 @@ fn parse_static_variable(
 
     let name = if linkage_name.is_none() {
         // This is a heuristic for detecting #[no_mangle] Rust variables.
-        name.unwrap().into_owned()
+        name.unwrap()
     } else {
         builder.format_path(name.unwrap())
     };

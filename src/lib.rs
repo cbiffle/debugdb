@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 // Internal type abbreviations
 type BTreeIndex<I, K> = BTreeMap<K, BTreeSet<I>>;
+type RtArcReader = gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>;
 
 /// A database of information extracted from the debug info of a program.
 ///
@@ -631,24 +632,18 @@ pub fn parse_file<'a>(
     };
 
     let load_section =
-        |id: gimli::SectionId| -> Result<Cow<'a, [u8]>, gimli::Error> {
-            match object.section_by_name(id.name()) {
-                Some(section) => Ok(section
-                    .uncompressed_data()
-                    .unwrap_or(Default::default())),
-                None => Ok(Default::default()),
-            }
+        |id: gimli::SectionId| -> Result<RtArcReader, Box<dyn std::error::Error>> {
+            let cow = object.section_by_name(id.name())
+                .map(|sect| sect.uncompressed_data())
+                .transpose()?
+                .unwrap_or_else(Default::default);
+            Ok(gimli::EndianReader::new(Arc::from(cow), endian))
         };
 
-    let dwarf_cow = gimli::Dwarf::load(&load_section)?;
-
-    let dwarf =
-        dwarf_cow.borrow(|section| gimli::EndianSlice::new(section, endian));
+    let dwarf = gimli::Dwarf::load(&load_section)?;
 
     use gimli::Section;
-    let debug_frame: gimli::DebugFrame<gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>> = gimli::DebugFrame::load(
-        |id| Ok::<_, gimli::Error>(gimli::EndianReader::new(Arc::from(&*load_section(id)?), endian)),
-    )?;
+    let debug_frame = gimli::DebugFrame::load(load_section)?;
 
     let mut builder = DebugDbBuilder::new(endian, object.is_64(), debug_frame);
 
@@ -666,15 +661,18 @@ pub fn parse_file<'a>(
                     if let Some(directory) = file.directory(header) {
                         format!(
                             "{}/{}",
-                            dwarf.attr_string(&unit, directory)?.to_string_lossy(),
+                            String::from_utf8_lossy(dwarf.attr_string(&unit, directory)?.bytes()),
+                            String::from_utf8_lossy(
                             dwarf
                             .attr_string(&unit, file.path_name())?
-                            .to_string_lossy()
+                            .bytes())
                         ).into()
                     } else {
+                        String::from_utf8_lossy(
                         dwarf
                             .attr_string(&unit, file.path_name())?
-                            .to_string_lossy()
+                            .bytes())
+                            .into_owned()
                     }
                 } else {
                     "???".into()
@@ -687,7 +685,7 @@ pub fn parse_file<'a>(
                 if !row.end_sequence() {
                     last_row = Some(LineNumberRow {
                         pc_range: row.address()..0,
-                        file: file.into_owned(),
+                        file,
                         line: row.line(),
                         column: match row.column() {
                             gimli::ColumnType::Column(c) => Some(c),
