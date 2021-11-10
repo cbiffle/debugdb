@@ -14,3 +14,6 @@ indexmap = "1.7"
 scroll = "0.10"
 rustyline = "9.0"
 ansi_term = "0.12.1"
+
+[profile.release]
+debug = true
