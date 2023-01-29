@@ -1,6 +1,9 @@
-use structopt::StructOpt;
+use std::fmt::Display;
 
-use debugdb::{Type, Encoding, TypeId};
+use structopt::StructOpt;
+use rangemap::RangeMap;
+
+use debugdb::{Type, Encoding, TypeId, Struct, Member, DebugDb, Enum, VariantShape};
 
 #[derive(Debug, StructOpt)]
 struct TySh {
@@ -126,15 +129,24 @@ fn cmd_list(
     db: &debugdb::DebugDb,
     args: &str,
 ) {
-    for (goff, ty) in db.types() {
-        if !args.is_empty() {
-            if let Some(name) = db.type_name(goff) {
-                if !name.contains(args) {
-                    continue;
+    // We're gonna make a copy to sort it, because alphabetical order seems
+    // polite.
+    let mut types_copy = db.canonical_types()
+        .filter(|(goff, _ty)| {
+            if !args.is_empty() {
+                if let Some(name) = db.type_name(*goff) {
+                    return name.contains(args);
+                } else {
+                    return false;
                 }
             }
-        }
+            true
+        })
+        .collect::<Vec<_>>();
 
+    types_copy.sort_by_key(|(goff, _ty)| db.type_name(*goff));
+
+    for (goff, ty) in types_copy {
         let kind = match ty {
             Type::Base(_) => "base",
             Type::Struct(_) => "struct",
@@ -144,9 +156,15 @@ fn cmd_list(
             Type::Pointer(_) => "ptr",
             Type::Union(_) => "union",
             Type::Subroutine(_) => "subr",
+            Type::Unresolved(_) => "missing",
         };
 
-        println!("{:6} {}", kind, NamedGoff(db, goff));
+        let aliases = db.aliases_of_type(goff);
+        if let Some(aliases) = aliases {
+            println!("{:6} {} ({} aliases)", kind, NamedGoff(db, goff), aliases.len());
+        } else {
+            println!("{:6} {}", kind, NamedGoff(db, goff));
+        }
     }
 }
 
@@ -259,7 +277,9 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                 } else {
                     println!("struct type");
                 }
-                println!("- byte size: {}", s.byte_size);
+                if let Some(z) = s.byte_size {
+                    println!("- byte size: {z}");
+                }
                 if let Some(a) = s.alignment {
                     println!("- alignment: {}", a);
                 } else {
@@ -273,13 +293,16 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                 }
                 if !s.members.is_empty() {
                     println!("- members:");
-                    for mem in s.members.values() {
+                    for (i, mem) in s.members.values().enumerate() {
                         if let Some(name) = &mem.name {
-                            println!("  - {}: {}", name, NamedGoff(db, mem.type_id));
+                            println!("  {i}. {name}: {}", NamedGoff(db, mem.type_id));
                         } else {
                             println!("  - <unnamed>: {}", NamedGoff(db, mem.type_id));
                         }
                         println!("    - offset: {} bytes", mem.location);
+                        if let Some(s) = db.type_by_id(mem.type_id).unwrap().byte_size(db) {
+                            println!("    - size: {} bytes", s);
+                        }
                         if let Some(a) = mem.alignment {
                             println!("    - aligned: {} bytes", a);
                         }
@@ -290,10 +313,14 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                 } else {
                     println!("- no members");
                 }
+
+                struct_picture(db, s, db.pointer_size() as usize);
             }
             Type::Enum(s) => {
                 println!("enum type");
-                println!("- byte size: {}", s.byte_size);
+                if let Some(z) = s.byte_size {
+                    println!("- byte size: {z}");
+                }
                 if let Some(a) = s.alignment {
                     println!("- alignment: {}", a);
                 } else {
@@ -355,11 +382,14 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                         }
                     }
                 }
+                enum_picture(db, s, db.pointer_size() as usize);
             }
             Type::CEnum(s) => {
                 println!("C-like enum type");
                 println!("- byte size: {}", s.byte_size);
-                println!("- alignment: {}", s.alignment);
+                if let Some(a) = s.alignment {
+                    println!("- alignment: {a}");
+                }
                 println!("- {} values defined", s.enumerators.len());
                 for e in s.enumerators.values() {
                     println!("  - {} = 0x{:x}", e.name, e.const_value);
@@ -408,6 +438,9 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                     }
                 }
             }
+            Type::Unresolved(_) => {
+                println!("type not found in debug info!");
+            }
         }
     })
 }
@@ -453,16 +486,16 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
                     (Encoding::Float, 4) => print!("f32"),
                     (Encoding::Float, 8) => print!("f64"),
                     (Encoding::Boolean, 1) => print!("bool"),
-                    (Encoding::UnsignedChar, 4) => print!("char"),
                     (Encoding::UnsignedChar, 1) => print!("c_uchar"),
                     (Encoding::SignedChar, 1) => print!("c_schar"),
+                    (Encoding::UtfChar, 4) => print!("char"),
 
                     (e, s) => print!("Unhandled{:?}{}", e, s),
                 }
                 println!(";");
             }
-            Type::Pointer(s) => {
-                println!("{}", s.name);
+            Type::Pointer(_s) => {
+                print!("type _ = {};", t.name(db));
             }
             Type::Array(s) => {
                 let name = db.type_name(s.element_type_id).unwrap();
@@ -632,6 +665,9 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
                 println!("    // (this is a subroutine type, _not_ a fn ptr)");
                 println!("    unimplemented!();");
                 println!("}}");
+            }
+            Type::Unresolved(_) => {
+                println!("(type not found in debug info!)");
             }
         }
     })
@@ -943,4 +979,210 @@ fn cmd_unwind(db: &debugdb::DebugDb, args: &str) {
     }
 }
 
+fn struct_picture(db: &DebugDb, s: &Struct, width: usize) {
+    struct_picture_inner(
+        db,
+        s.byte_size,
+        s.members.values().enumerate().map(|(i, m)| (i, m, true)),
+        width,
+    )
+}
 
+fn struct_picture_inner<'a, N: Eq + Clone + Display>(
+    db: &DebugDb,
+    byte_size: Option<u64>,
+    members: impl IntoIterator<Item = (N, &'a Member, bool)>,
+    width: usize,
+) {
+    let Some(size) = byte_size else {
+        println!("type has no size");
+        return;
+    };
+
+    if size == 0 {
+        println!("(type is 0 bytes long)");
+        return;
+    }
+
+    let mut member_spans: RangeMap<u64, N> = RangeMap::new();
+    let mut member_labels = vec![];
+    for (i, m, in_legend) in members {
+        if in_legend {
+            member_labels.push({
+                let label = if db.type_by_id(m.type_id).unwrap().byte_size(db) == Some(0) {
+                    "(ZST)".to_string()
+                } else {
+                    i.to_string()
+                };
+
+                let name = if let Some(name) = &m.name {
+                    name.as_str()
+                } else {
+                    "_"
+                };
+                if label == name {
+                    format!("{name}: {}", NamedGoff(db, m.type_id))
+                } else {
+                    format!("{label} = {name}: {}", NamedGoff(db, m.type_id))
+                }
+            });
+        }
+        let offset = m.location;
+        let Some(size) = db.type_by_id(m.type_id).unwrap().byte_size(db) else {
+            continue;
+        };
+        if size != 0 {
+            member_spans.insert(offset..offset + size, i);
+        }
+    }
+
+    byte_picture(size, width, |off| {
+        member_spans.get(&off).map(|x| x.to_string())
+    });
+    if !member_labels.is_empty() {
+        println!("     where:");
+        for label in member_labels {
+            println!("       {label}");
+        }
+    }
+}
+
+fn enum_picture(db: &DebugDb, s: &Enum, width: usize) {
+    let Some(size) = s.byte_size else {
+        println!("type has no size");
+        return;
+    };
+
+    if size == 0 {
+        println!("(type is 0 bytes long)");
+        return;
+    }
+
+    println!();
+
+    match &s.shape {
+        VariantShape::Zero => {
+            println!("this enum is empty and cannot be diagrammed.");
+        }
+        VariantShape::One(_v) => {
+            println!("this enum has only one variant (TODO)");
+        }
+        VariantShape::Many { member, variants, .. } => {
+            let Some(dlen) = db.type_by_id(member.type_id).unwrap().byte_size(db) else {
+                println!("discriminator type has no size?");
+                return;
+            };
+            let drange = member.location .. member.location + dlen;
+            println!("Discriminator position:");
+            byte_picture(size, width, |off| {
+                if drange.contains(&off) {
+                    Some("DISC".to_string())
+                } else {
+                    Some("body".to_string())
+                }
+            });
+            for (disc, var) in variants {
+                let show_disc = if let Some(v) = disc {
+                    print!("DISC == {v:#x} => body: ");
+                    true
+                } else {
+                    print!("else => body: ");
+                    false
+                };
+                println!("{}", NamedGoff(db, var.member.type_id));
+                let vt = db.type_by_id(var.member.type_id).unwrap();
+                match vt {
+                    Type::Struct(s) => {
+                        let mut all_members = vec![];
+                        if show_disc {
+                            all_members.push(("DISC", member, false));
+                        }
+                        all_members.extend(
+                            s.members.iter().map(|(n, m)| {
+                                let mut n = n.as_str();
+                                if n.len() > 6 {
+                                    n = &n[..6];
+                                }
+
+                                (n, m, true)
+                            })
+                        );
+                        struct_picture_inner(db, s.byte_size, all_members, width);
+                    },
+                    _ => println!("(can't display non-struct)"),
+                }
+            }
+        }
+    }
+}
+
+fn byte_picture(
+    size: u64,
+    width: usize,
+    owner: impl Fn(u64) -> Option<String>,
+) {
+    let width = width as u64;
+    print!("      ");
+    for byte in 0..u64::min(size, width) {
+        print!(" {byte:^6}");
+    }
+    println!();
+
+    let wordcount = (size + (width - 1)) / width;
+    let mut current = None;
+    let mut above = vec![None; width as usize];
+    for word in 0..wordcount {
+        print!("     +");
+        for byte in 0..width {
+            let n = owner(word * width + byte);
+            if above[byte as usize] == Some(n) {
+                print!("      +");
+            } else {
+                print!("------+");
+            }
+        }
+        println!();
+
+        print!("{:04x} |", word * width);
+        for byte in 0..width {
+            let off = word * width + byte;
+            let n = owner(off);
+            if Some(&n) != current.as_ref() {
+                if byte != 0 {
+                    print!("|");
+                }
+                if let Some(i) = &n {
+                    print!("{:^6}", i);
+                } else {
+                    if off < size {
+                        print!(" pad  ");
+                    } else {
+                        print!("      ");
+                    }
+                }
+                current = Some(n.clone());
+            } else {
+                if byte != 0 {
+                    print!(" ");
+                }
+                print!("      ");
+            }
+
+            if byte == width - 1 {
+                if off < size {
+                    println!("|");
+                } else {
+                    println!();
+                }
+            }
+
+            above[byte as usize] = Some(n);
+        }
+    }
+    print!("     +");
+    let final_bar = if size % width == 0 { width } else { size % width };
+    for _ in 0..final_bar {
+        print!("------+");
+    }
+    println!();
+}

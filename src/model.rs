@@ -3,6 +3,7 @@
 //! This is our abstract description of types and routines in a program.
 
 use std::borrow::Cow;
+use std::hash::Hash;
 use std::num::NonZeroU64;
 use crate::DebugDb;
 use indexmap::IndexMap;
@@ -54,6 +55,7 @@ pub enum Type {
     Pointer(Pointer),
     Union(Union),
     Subroutine(Subroutine),
+    Unresolved(Unresolved),
 }
 
 impl Type {
@@ -70,6 +72,7 @@ impl Type {
             Self::Pointer(s) => s.offset,
             Self::Union(s) => s.offset,
             Self::Subroutine(s) => s.offset,
+            Self::Unresolved(s) => s.offset,
         }
     }
 
@@ -80,19 +83,16 @@ impl Type {
         match self {
             Self::Struct(s) => s.alignment,
             Self::Enum(s) => s.alignment,
-            Self::Base(s) => {
-                // TODO: we're going to just assume that all base types are
-                // naturally aligned.
-                Some(s.byte_size)
-            }
-            Self::CEnum(s) => Some(s.alignment),
+            Self::Base(s) => s.alignment,
+            Self::CEnum(s) => s.alignment,
             Self::Union(s) => Some(s.alignment),
             Self::Array(a) => {
                 let eltty = world.type_by_id(a.element_type_id)?;
                 eltty.alignment(world)
             }
             Self::Pointer(_) => Some(world.pointer_size()),
-            Self::Subroutine(_) => None,
+
+            _ => None,
         }
     }
 
@@ -104,14 +104,13 @@ impl Type {
     /// implementation detail of the full `byte_size` algorithm.
     pub fn inherent_byte_size(&self) -> Option<u64> {
         match self {
-            Self::Struct(s) => Some(s.byte_size),
-            Self::Enum(s) => Some(s.byte_size),
+            Self::Struct(s) => s.byte_size,
+            Self::Enum(s) => s.byte_size,
             Self::Base(s) => Some(s.byte_size),
             Self::CEnum(s) => Some(s.byte_size),
             Self::Union(s) => Some(s.byte_size),
-            Self::Array(_) => None,
-            Self::Pointer(_) => None,
-            Self::Subroutine(_) => None,
+
+            _ => None,
         }
     }
 
@@ -157,7 +156,17 @@ impl Type {
             Self::Base(s) => (&s.name).into(),
             Self::CEnum(s) => (&s.name).into(),
             Self::Union(s) => (&s.name).into(),
-            Self::Pointer(s) => (&s.name).into(),
+            Self::Pointer(s) => {
+                if let Some(assigned_name) = &s.name {
+                    assigned_name.into()
+                } else {
+                    let pointee_name = world
+                        .type_by_id(s.type_id)
+                        .map(|t| t.name(world))
+                        .unwrap_or("???".into());
+                    format!("*_ {pointee_name}").into()
+                }
+            }
             Self::Array(a) => {
                 let eltname = world
                     .type_by_id(a.element_type_id.into())
@@ -171,6 +180,7 @@ impl Type {
                 }
             }
             Self::Subroutine(_) => "subroutine".into(), // TODO
+            Self::Unresolved(_) => "<UNRESOLVED>".into(),
         }
     }
 }
@@ -237,6 +247,8 @@ pub struct Base {
     pub encoding: Encoding,
     /// Number of bytes in a value of the type.
     pub byte_size: u64,
+    /// Explicit alignment, if given.
+    pub alignment: Option<u64>,
     /// Location in debug info.
     pub offset: gimli::UnitSectionOffset,
 }
@@ -253,7 +265,7 @@ pub struct Struct {
     /// Name of the struct type.
     pub name: String,
     /// Size of a value of this struct in bytes.
-    pub byte_size: u64,
+    pub byte_size: Option<u64>,
     /// Alignment required for values of this struct.
     pub alignment: Option<u64>,
     /// If this struct is generic, a list of template parameters. Non-generic
@@ -287,7 +299,7 @@ pub struct Enum {
     /// Name of the enum type.
     pub name: String,
     /// Size of a value of the enum type, in bytes.
-    pub byte_size: u64,
+    pub byte_size: Option<u64>,
     /// Alignment required for values of this enum.
     pub alignment: Option<u64>,
     /// If this struct is generic, a list of template parameters. Non-generic
@@ -312,7 +324,7 @@ pub struct CEnum {
     /// Size of a value of the enum type, in bytes.
     pub byte_size: u64,
     /// Alignment required for values of this enum.
-    pub alignment: u64,
+    pub alignment: Option<u64>,
     /// Variants ("enumerators") of this type.
     pub enumerators: IndexMap<u64, Enumerator>,
     /// Location in debug info.
@@ -353,8 +365,8 @@ pub struct Array {
 pub struct Pointer {
     /// Type of data this points _to_.
     pub type_id: TypeId,
-    /// Name of the pointer type.
-    pub name: String,
+    /// Name of the pointer type. Compilers don't name all pointer types.
+    pub name: Option<String>,
     /// Location in debug info.
     pub offset: gimli::UnitSectionOffset,
 }
@@ -395,6 +407,16 @@ pub struct Subroutine {
     pub offset: gimli::UnitSectionOffset,
 }
 
+/// A type that was not found in the debug info.
+///
+/// Usually this is because it's not actually used in the program, and only
+/// indirectly referenced.
+#[derive(Debug, Clone)]
+pub struct Unresolved {
+    /// Location in debug info.
+    pub offset: gimli::UnitSectionOffset,
+}
+
 /// Possible encodings for a `Base` type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Encoding {
@@ -423,6 +445,8 @@ pub enum Encoding {
     /// Note that this encoding is specific to the `__Complex` C language
     /// extension, and is _not used_ for Rust complex numbers.
     ComplexFloat,
+
+    UtfChar,
 }
 
 /// Information on a type parameter binding for an instance of a generic type.
@@ -438,7 +462,7 @@ pub struct TemplateTypeParameter {
 }
 
 /// A component of a struct or union.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Member {
     /// Name of the member. Not all members have names, though in Rust they all
     /// do.
@@ -651,4 +675,239 @@ pub struct StaticVariable {
     pub location: u64,
     /// Location in debug info.
     pub offset: gimli::UnitSectionOffset,
+}
+
+pub trait Equiv {
+    /// Tests if `self` and `other` are structurally equivalent, such that they
+    /// could be unified into a single definition despite appearing in separate
+    /// compilation units.
+    ///
+    /// Returns `None` if there is no way to make the definitions match, or
+    /// `Some(tids)` if the definitions match if all the types in `tids` are
+    /// also equivalent to each other.
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>>;
+}
+
+impl Equiv for TypeId {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        Some(vec![(*self, *other)])
+    }
+}
+
+impl Equiv for Member {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        let self_easy = (&self.name, self.artificial, self.alignment, self.location);
+        let other_easy = (&other.name, other.artificial, other.alignment, other.location);
+        if self_easy != other_easy {
+            return None;
+        }
+
+        Some(vec![(self.type_id, other.type_id)])
+    }
+}
+
+impl Equiv for Variant {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        self.member.equiv(&other.member)
+    }
+}
+
+impl Equiv for VariantShape {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        match (self, other) {
+            (Self::Zero, Self::Zero) => Some(vec![]),
+            (Self::One(a), Self::One(b)) => a.equiv(b),
+            (Self::Many { member: ma, variants: va, .. }, Self::Many { member: mb, variants: vb, .. }) => {
+                let mut conditions = vec![];
+                conditions.extend(ma.equiv(mb)?);
+                conditions.extend(va.equiv(vb)?);
+                Some(conditions)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Equiv for TemplateTypeParameter {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        if self.name != other.name {
+            return None;
+        }
+
+        Some(vec![(self.type_id, other.type_id)])
+    }
+}
+
+impl<T> Equiv for Vec<T>
+    where T: Equiv,
+{
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        if self.len() != other.len() {
+            return None;
+        }
+
+        let mut conditions = vec![];
+        for (a, b) in self.iter().zip(other) {
+            conditions.extend(a.equiv(b)?);
+        }
+        Some(conditions)
+    }
+}
+
+impl<T> Equiv for Option<T>
+    where T: Equiv,
+{
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        match (self, other) {
+            (Some(a), Some(b)) => a.equiv(b),
+            _ => None
+        }
+    }
+}
+
+impl<K, T> Equiv for IndexMap<K, T>
+    where T: Equiv,
+          K: Eq + Hash,
+{
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        if self.len() != other.len() {
+            return None;
+        }
+
+        let mut conditions = vec![];
+        for (ak, a) in self {
+            conditions.extend(a.equiv(other.get(ak)?)?);
+        }
+        Some(conditions)
+    }
+}
+
+impl Equiv for Struct {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        let self_easy = (&self.name, self.byte_size, self.alignment, self.tuple_like);
+        let other_easy = (&other.name, other.byte_size, other.alignment, other.tuple_like);
+        if self_easy != other_easy {
+            return None;
+        }
+
+        let mut conditions = vec![];
+        conditions.extend(self.template_type_parameters.equiv(&other.template_type_parameters)?);
+        conditions.extend(self.members.equiv(&other.members)?);
+
+        Some(conditions)
+    }
+}
+
+impl Equiv for Union {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        let self_easy = (&self.name, self.byte_size, self.alignment);
+        let other_easy = (&other.name, other.byte_size, other.alignment);
+        if self_easy != other_easy {
+            return None;
+        }
+
+        let mut conditions = vec![];
+        conditions.extend(self.template_type_parameters.equiv(&other.template_type_parameters)?);
+        conditions.extend(self.members.equiv(&other.members)?);
+
+        Some(conditions)
+    }
+}
+
+impl Equiv for Enum {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        let self_easy = (&self.name, self.byte_size, self.alignment);
+        let other_easy = (&other.name, other.byte_size, other.alignment);
+        if self_easy != other_easy {
+            return None;
+        }
+
+        let mut conditions = vec![];
+        conditions.extend(self.template_type_parameters.equiv(&other.template_type_parameters)?);
+        conditions.extend(self.shape.equiv(&other.shape)?);
+
+        Some(conditions)
+    }
+}
+
+impl Equiv for Pointer {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        if self.name != other.name {
+            // TODO: should this allow for one unnamed type?
+            return None;
+        }
+
+        Some(vec![(self.type_id, other.type_id)])
+    }
+}
+
+impl Equiv for Base {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        let self_easy = (&self.name, self.encoding, self.byte_size, self.alignment);
+        let other_easy = (&other.name, other.encoding, other.byte_size, other.alignment);
+        if self_easy != other_easy {
+            return None;
+        }
+
+        Some(vec![])
+    }
+}
+
+impl Equiv for Array {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        if self.lower_bound != other.lower_bound || self.count != other.count {
+            return None;
+        }
+
+        Some(vec![
+            (self.element_type_id, other.element_type_id),
+            (self.index_type_id, other.index_type_id),
+        ])
+    }
+}
+
+impl Equiv for Enumerator {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        if self.name != other.name || self.const_value != other.const_value {
+            return None;
+        }
+        Some(vec![])
+    }
+}
+
+impl Equiv for CEnum {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        let self_easy = (&self.name, self.enum_class, self.byte_size, self.alignment);
+        let other_easy = (&other.name, other.enum_class, other.byte_size, other.alignment);
+        if self_easy != other_easy {
+            return None;
+        }
+
+        self.enumerators.equiv(&other.enumerators)
+    }
+}
+
+impl Equiv for Subroutine {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        let mut conditions = vec![];
+        conditions.extend(self.return_type_id.equiv(&other.return_type_id)?);
+        conditions.extend(self.formal_parameters.equiv(&other.formal_parameters)?);
+        Some(conditions)
+    }
+}
+
+impl Equiv for Type {
+    fn equiv(&self, other: &Self) -> Option<Vec<(TypeId, TypeId)>> {
+        match (self, other) {
+            (Self::Struct(a), Self::Struct(b)) => a.equiv(b),
+            (Self::Enum(a), Self::Enum(b)) => a.equiv(b),
+            (Self::Pointer(a), Self::Pointer(b)) => a.equiv(b),
+            (Self::Base(a), Self::Base(b)) => a.equiv(b),
+            (Self::Array(a), Self::Array(b)) => a.equiv(b),
+            (Self::CEnum(a), Self::CEnum(b)) => a.equiv(b),
+            (Self::Union(a), Self::Union(b)) => a.equiv(b),
+            (Self::Subroutine(a), Self::Subroutine(b)) => a.equiv(b),
+            _ => None,
+        }
+    }
 }

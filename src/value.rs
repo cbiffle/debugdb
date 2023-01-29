@@ -5,6 +5,7 @@
 
 use crate::load::{choose_variant, load_unsigned, Load};
 use crate::{Encoding, Type, DebugDb, TypeId};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
@@ -207,7 +208,7 @@ impl Load for Pointer {
             let value = load_unsigned(world.endian(), buffer, addr, 8);
 
             Ok(Self {
-                name: s.name.clone(),
+                name: Cow::into_owned(ty.name(world)),
                 dest_type_id: s.type_id,
                 value,
             })

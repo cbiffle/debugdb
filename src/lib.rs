@@ -4,8 +4,11 @@
 pub mod load;
 pub mod value;
 pub mod model;
+pub mod unify;
 
 mod dwarf_parser;
+
+use crate::unify::Unify;
 
 pub use self::model::*;
 
@@ -39,6 +42,17 @@ pub struct DebugDb {
     /// Invariant: within each entry, the key is the same as the type's `offset`
     /// field.
     types: BTreeMap<TypeId, Type>,
+
+    /// Type canonicalization relationships. If a type ID is present as a key in
+    /// this map, then it is _not_ the canonical instance of its type, and
+    /// should be replaced by the corresponding value in the map for analysis
+    /// purposes.
+    type_canon: BTreeMap<TypeId, TypeId>,
+
+    /// Reverse type canonicalization relationship. Each key in this map is the
+    /// ID of a canonical instance of a family of types, and the value lists
+    /// those types.
+    type_rcanon: BTreeMap<TypeId, BTreeSet<TypeId>>,
 
     /// Index: type name to location(s) that can be looked up in `types`.
     ///
@@ -110,6 +124,19 @@ impl DebugDb {
         &self,
     ) -> impl Iterator<Item = (TypeId, &Type)> + '_ {
         self.types.iter().map(|(&id, ty)| (id, ty))
+    }
+
+    /// Produces an iterator over all canonical types defined in the debug info,
+    /// together with their IDs.
+    pub fn canonical_types(
+        &self,
+    ) -> impl Iterator<Item = (TypeId, &Type)> + '_ {
+        self.types()
+            .filter(move |(tid, _t)| !self.type_canon.contains_key(tid))
+    }
+
+    pub fn aliases_of_type(&self, id: TypeId) -> Option<&BTreeSet<TypeId>> {
+        self.type_rcanon.get(&id)
     }
 
     /// Looks up the type with the given ID.
@@ -360,6 +387,7 @@ pub struct DebugDbBuilder {
     endian: gimli::RunTimeEndian,
     is_64: bool,
     types: BTreeMap<TypeId, Type>,
+    decls: BTreeMap<String, BTreeSet<TypeId>>,
     debug_frame: gimli::DebugFrame<gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>>,
 
     subprograms: BTreeMap<ProgramId, Subprogram>,
@@ -381,6 +409,7 @@ impl DebugDbBuilder {
             is_64,
             debug_frame,
             types: BTreeMap::new(),
+            decls: BTreeMap::new(),
             subprograms: BTreeMap::new(),
             line_table: BTreeMap::new(),
             variables: BTreeMap::new(),
@@ -388,18 +417,84 @@ impl DebugDbBuilder {
     }
 
     pub fn build(self) -> Result<DebugDb, Box<dyn std::error::Error>> {
-        let check = |id| -> Result<(), Box<dyn std::error::Error>> {
-            if self.types.contains_key(&id) {
+        let mut types = self.types;
+
+        // Build type name index.
+        let mut type_name_index = index_by_key(&types, |_, t| match t {
+            Type::Struct(s) => Some(s.name.clone()),
+            Type::Enum(s) => Some(s.name.clone()),
+            Type::Base(s) => Some(s.name.clone()),
+            Type::CEnum(s) => Some(s.name.clone()),
+            Type::Union(s) => Some(s.name.clone()),
+            Type::Pointer(s) => s.name.clone(),
+            _ => None,
+        });
+
+        // Attempt to unify similarly named types, narrowing the type name index
+        // as we go.
+        let mut u = crate::unify::State::new(&types);
+        for (_name, homonyms) in &mut type_name_index {
+            let mut workset = homonyms.clone();
+            let mut group_u = crate::unify::State::new(&types);
+            while let Some(t) = workset.pop_first() {
+                for o in &workset {
+                    t.try_unify(o, &mut group_u);
+                }
+            }
+            // Reduce the set of homonyms for this name to only those types that
+            // were not found to have equivalent partners.
+            homonyms.retain(|t| !group_u.is_subbed(*t));
+            u.merge(group_u);
+        }
+
+        // Attempt to resolve decls.
+        let mut ambiguous_decl_count = 0;
+        for (name, decl_ids) in &self.decls {
+            if let Some(tids) = type_name_index.get(name) {
+                if tids.len() != 1 {
+                    // The name is still ambiguous after unification.
+                    eprintln!("WARN: decl ambiguous; {name} could be:");
+                    for tid in tids {
+                        eprintln!("- {tid:x?}");
+                    }
+                    ambiguous_decl_count += 1;
+                }
+                // Assume it's the first one.
+                let tid = *tids.iter().next().unwrap();
+                for &alias in decl_ids {
+                    u.equate(alias, tid);
+                }
+            } else {
+                eprintln!("WARN: unresolved declaration {name}:");
+                for id in decl_ids {
+                    eprintln!(" - {id:x?}");
+                }
+            }
+        }
+        if ambiguous_decl_count > 0 {
+            eprintln!("WARN: {ambiguous_decl_count} ambiguous declarations found");
+        }
+
+        let mut unresolved_types = BTreeMap::new();
+
+        let mut check = |mut id| -> Result<(), Box<dyn std::error::Error>> {
+            id = u.canonicalize(id);
+            if types.contains_key(&id) {
                 Ok(())
             } else {
-                Err(format!("reference to missing type {:x?}", id).into())
+                unresolved_types.insert(id, Type::Unresolved(Unresolved {
+                    offset: id.0,
+                }));
+                Ok(()) // TODO
             }
         };
+        
         // Validate that the world is complete and internally consistent.
-        for t in self.types.values() {
+        for t in types.values() {
             match t {
                 Type::Base(_) => (),
                 Type::CEnum(_) => (),
+                Type::Unresolved(_) => (),
 
                 Type::Struct(s) => {
                     for ttp in &s.template_type_parameters {
@@ -455,18 +550,11 @@ impl DebugDbBuilder {
             }
         }
 
-        // Build type name index.
-        let type_name_index = index_by_key(&self.types, |_, t| match t {
-            Type::Struct(s) => Some(s.name.clone()),
-            Type::Enum(s) => Some(s.name.clone()),
-            Type::Base(s) => Some(s.name.clone()),
-            Type::CEnum(s) => Some(s.name.clone()),
-            Type::Union(s) => Some(s.name.clone()),
-            Type::Pointer(s) => Some(s.name.clone()),
-            _ => None,
-        });
+        let type_canon = u.finish();
+        types.extend(unresolved_types);
+
         // Build array index.
-        let array_index = index_by_key(&self.types, |_, t| match t {
+        let array_index = index_by_key(&types, |_, t| match t {
             Type::Array(a) => Some((a.element_type_id, a.count)),
             _ => None,
         });
@@ -474,7 +562,7 @@ impl DebugDbBuilder {
         // indices.
         let subroutine_index = {
             let mut ind = BTreeMap::<_, BTreeIndex<_, _>>::new();
-            for (k, v) in &self.types {
+            for (k, v) in &types {
                 if let Type::Subroutine(s) = v {
                     ind.entry(s.formal_parameters.clone())
                         .or_default()
@@ -491,10 +579,14 @@ impl DebugDbBuilder {
         // Build address map.
         let mut entities_by_address: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for (&vid, v) in &self.variables {
-            let t = &self.types[&v.type_id];
+            let Some(t) = types.get(&v.type_id) else {
+                eprintln!("WARN: type of variable {} not found: {:x?}",
+                    v.name, v.type_id);
+                continue;
+            };
             let sz = t.byte_size_early(
                 if self.is_64 { 8 } else { 4 },
-                |t| self.types.get(&t),
+                |t| types.get(&t),
             );
             if let Some(sz) = sz {
                 entities_by_address.entry(v.location)
@@ -533,9 +625,13 @@ impl DebugDbBuilder {
             }
         }
 
+        let type_rcanon = invert(&type_canon);
+
         Ok(DebugDb {
             endian: self.endian,
-            types: self.types,
+            types,
+            type_canon,
+            type_rcanon,
             is_64: self.is_64,
             subprograms: self.subprograms,
             line_table: self.line_table,
@@ -570,6 +666,12 @@ impl DebugDbBuilder {
         self.line_table.entry(addr)
             .or_default()
             .push(r)
+    }
+
+    pub fn record_decl(&mut self, name: impl std::fmt::Display, id: TypeId) {
+        self.decls.entry(self.format_path(name))
+            .or_default()
+            .insert(id);
     }
 
     fn format_path(&self, name: impl std::fmt::Display) -> String {
@@ -720,4 +822,15 @@ pub struct AddressRange {
 pub enum EntityId {
     Var(VarId),
     Prog(ProgramId),
+}
+
+fn invert<K, V>(map: &BTreeMap<K, V>) -> BTreeMap<V, BTreeSet<K>>
+    where K: Eq + Ord + Clone,
+          V: Eq + Ord + Clone,
+{
+    let mut result: BTreeMap<V, BTreeSet<K>> = BTreeMap::new();
+    for (k, v) in map {
+        result.entry(v.clone()).or_default().insert(k.clone());
+    }
+    result
 }

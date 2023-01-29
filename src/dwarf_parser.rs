@@ -75,8 +75,13 @@ fn handle_nested_types(
             gim_con::DW_TAG_variable => {
                 parse_static_variable(dwarf, unit, cursor, builder)?;
             }
-            _ => {
+
+            gim_con::DW_TAG_typedef | gim_con::DW_TAG_const_type | gim_con::DW_TAG_restrict_type => {
                 skip_entry(cursor)?;
+            }
+            _ => {
+                panic!("{} {:x?}", child.tag(), child.offset().to_unit_section_offset(unit));
+                //skip_entry(cursor)?;
             }
         }
     }
@@ -135,6 +140,7 @@ fn parse_base_type(
     let mut name = None;
     let mut byte_size = None;
     let mut encoding = None;
+    let mut alignment = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
@@ -144,6 +150,9 @@ fn parse_base_type(
             }
             gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_alignment => {
+                alignment = Some(attr.value().udata_value().unwrap());
             }
             gim_con::DW_AT_encoding => {
                 if let gimli::AttributeValue::Encoding(e) = attr.value() {
@@ -155,7 +164,11 @@ fn parse_base_type(
                         gim_con::DW_ATE_signed_char => Encoding::SignedChar,
                         gim_con::DW_ATE_float => Encoding::Float,
                         gim_con::DW_ATE_complex_float => Encoding::ComplexFloat,
-                        _ => panic!("unsupported encoding: {:?}", e),
+                        gim_con::DW_ATE_UTF => Encoding::UtfChar,
+                        _ => {
+                            eprintln!("base type {name:?} will be ignored; unsupported encoding {e:?}");
+                            return skip_entry(cursor); // TODO
+                        }
                     });
                 } else {
                     panic!("unexpected value for encoding: {:?}", attr.value());
@@ -174,6 +187,7 @@ fn parse_base_type(
         offset,
         encoding,
         byte_size,
+        alignment,
     });
     Ok(())
 }
@@ -191,6 +205,7 @@ fn parse_structure_type(
     let mut name = None;
     let mut byte_size = None;
     let mut alignment = None;
+    let mut decl = false;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
@@ -205,8 +220,7 @@ fn parse_structure_type(
                 alignment = Some(attr.value().udata_value().unwrap());
             }
             gim_con::DW_AT_declaration => {
-                skip_entry(cursor)?;
-                return Ok(());
+                decl = true;
             }
             _ => (),
         }
@@ -216,7 +230,16 @@ fn parse_structure_type(
     let mut members = IndexMap::default();
     let mut variant_parts = vec![];
 
-    let name = name.unwrap();
+    let Some(name) = name else {
+        eprintln!("unnamed struct type");
+        return skip_entry(cursor);
+    };
+
+    if decl {
+        builder.record_decl(&name, TypeId(offset));
+        return skip_entry(cursor);
+    }
+
     if entry.has_children() {
         builder.path_component(name.clone(), |builder| {
             while let Some(()) = cursor.next_entry()? {
@@ -260,7 +283,6 @@ fn parse_structure_type(
         })?;
     }
 
-    let byte_size = byte_size.unwrap();
     let name = builder.format_path(name);
     if variant_parts.is_empty() {
         // Scan members to see if this looks like a tuple -- either a raw tuple
@@ -395,7 +417,8 @@ fn parse_member(
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let type_id = TypeId(type_id.unwrap());
-    let location = location.unwrap();
+    // A missing member location means zero, so sayeth the spec
+    let location = location.unwrap_or(0);
     let name = name.map(|s| s.to_string());
 
     Ok(Member {
@@ -594,7 +617,7 @@ fn parse_enumeration_type(
         })?;
     }
 
-    let (byte_size, alignment) = (byte_size.unwrap(), alignment.unwrap());
+    let byte_size = byte_size.unwrap();
     let name = builder.format_path(name);
 
     builder.record_type(CEnum {
@@ -800,18 +823,18 @@ fn parse_pointer_type(
                 }
             }
             gim_con::DW_AT_declaration => {
-                skip_entry(cursor)?;
-                return Ok(());
+                // TODO handle as declaration
+                return skip_entry(cursor);
             }
             _ => (),
         }
     }
 
-    if name.is_none() || type_id.is_none() {
-        return Ok(());
+    if type_id.is_none() {
+        eprintln!("WARN: skipping pointer type w/o typeid");
+        return skip_entry(cursor);
     }
 
-    let name = name.unwrap();
     let type_id = TypeId(type_id.unwrap());
 
     if entry.has_children() {
@@ -863,8 +886,8 @@ fn parse_union_type(
                 alignment = Some(attr.value().udata_value().unwrap());
             }
             gim_con::DW_AT_declaration => {
-                skip_entry(cursor)?;
-                return Ok(());
+                // TODO handle as declaration
+                return skip_entry(cursor);
             }
             _ => (),
         }
@@ -873,7 +896,10 @@ fn parse_union_type(
     let mut template_type_parameters = vec![];
     let mut members = vec![];
 
-    let name = name.unwrap();
+    let Some(name) = name else {
+        eprintln!("skipping nameless union at: {:x?}", offset);
+        return skip_entry(cursor);
+    };
     if entry.has_children() {
         builder.path_component(name.clone(), |_| {
             while let Some(()) = cursor.next_entry()? {
@@ -1017,6 +1043,13 @@ fn get_attr_string<'a>(
                 Ok(format!("<.debug_str+0x{:08x}>", offset.0))
             }
         }
+        gimli::AttributeValue::DebugLineStrRef(offset) => {
+            if let Ok(s) = dwarf.debug_line_str.get_str(offset) {
+                Ok(String::from_utf8_lossy(s.bytes()).into_owned())
+            } else {
+                Ok(format!("<.debug_line_str+0x{:08x}>", offset.0))
+            }
+        }
         gimli::AttributeValue::String(data) => {
             Ok(String::from_utf8_lossy(data.bytes()).into_owned()) // TODO hack
         }
@@ -1029,6 +1062,7 @@ fn skip_entry(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entry = cursor.current().unwrap();
 
+    /*
     match entry.tag() {
         gim_con::DW_TAG_structure_type => {
             eprintln!("WARN: structure skipped: offset={:x?}",
@@ -1038,8 +1072,13 @@ fn skip_entry(
             eprintln!("WARN: enumeration skipped: offset={:x?}",
                 entry.offset());
         }
+        gim_con::DW_TAG_base_type => {
+            eprintln!("WARN: base type skipped: offset={:x?}",
+                entry.offset());
+        }
         _ => (),
     }
+    */
 
     if entry.has_children() {
         while let Some(()) = cursor.next_entry()? {
@@ -1499,7 +1538,7 @@ fn parse_static_variable(
                         }
                         x => {
                             println!("unhandled location expression at {:x?}: {:?}", offset, x);
-                            return Ok(())
+                            return skip_entry(cursor);
                         }
                     } 
                 }
