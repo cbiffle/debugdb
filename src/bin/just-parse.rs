@@ -1,12 +1,12 @@
-use structopt::StructOpt;
+use clap::Parser;
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Parser)]
 struct Sketch {
     filename: std::path::PathBuf,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Sketch::from_args();
+    let args = Sketch::parse();
 
     let buffer = std::fs::read(args.filename)?;
     let object = object::File::parse(&*buffer)?;

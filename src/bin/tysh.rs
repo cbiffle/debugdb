@@ -1,17 +1,17 @@
 use std::fmt::Display;
 
-use structopt::StructOpt;
+use clap::Parser;
 use rangemap::RangeMap;
 
 use debugdb::{Type, Encoding, TypeId, Struct, Member, DebugDb, Enum, VariantShape};
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Parser)]
 struct TySh {
     filename: std::path::PathBuf,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = TySh::from_args();
+    let args = TySh::parse();
 
     let buffer = std::fs::read(args.filename)?;
     let object = object::File::parse(&*buffer)?;
@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loaded; {} types found in program.", everything.type_count());
     println!("To quit: ^D or exit");
 
-    let mut rl = rustyline::Editor::<()>::new();
+    let mut rl = rustyline::Editor::<(), _>::new()?;
     let prompt = ansi_term::Colour::Green.paint(">> ").to_string();
     'lineloop:
     loop {
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue 'lineloop;
                 }
 
-                rl.add_history_entry(line);
+                rl.add_history_entry(line)?;
 
                 match cmd {
                     "exit" => break,
@@ -1067,7 +1067,7 @@ fn enum_picture(db: &DebugDb, s: &Enum, width: usize) {
         VariantShape::One(_v) => {
             println!("this enum has only one variant (TODO)");
         }
-        VariantShape::Many { member, variants, .. } => {
+        VariantShape::Many { member, .. } => {
             let Some(dlen) = db.type_by_id(member.type_id).unwrap().byte_size(db) else {
                 println!("discriminator type has no size?");
                 return;
