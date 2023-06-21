@@ -100,7 +100,7 @@ impl Load for Struct {
         if let Type::Struct(s) = ty {
             let mut members = BTreeMap::new();
 
-            for m in s.members.values() {
+            for m in &s.members {
                 if let Some(n) = &m.name {
                     let t = world.type_by_id(m.type_id).unwrap();
                     let ma = addr + usize::try_from(m.location).unwrap();

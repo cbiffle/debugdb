@@ -227,7 +227,7 @@ fn parse_structure_type(
     }
 
     let mut template_type_parameters = vec![];
-    let mut members = IndexMap::default();
+    let mut members = vec![];
     let mut variant_parts = vec![];
 
     let Some(name) = name else {
@@ -254,18 +254,7 @@ fn parse_structure_type(
                         }
                         gim_con::DW_TAG_member => {
                             let m = parse_member(dwarf, unit, cursor)?;
-                            if let Some(n) = &m.name {
-                                if let Some(old_m) =
-                                    members.insert(n.clone(), m)
-                                {
-                                    panic!(
-                                        "duplicate member for name {:?}",
-                                        old_m.name
-                                    );
-                                }
-                            } else {
-                                panic!("nameless member confuse author");
-                            }
+                            members.push(m);
                         }
                         gim_con::DW_TAG_variant_part => {
                             variant_parts
@@ -287,7 +276,7 @@ fn parse_structure_type(
     if variant_parts.is_empty() {
         // Scan members to see if this looks like a tuple -- either a raw tuple
         // or a tuple struct.
-        let tuple_like = members.values().enumerate().all(|(i, m)| {
+        let tuple_like = members.iter().enumerate().all(|(i, m)| {
             if let Some(name) = &m.name {
                 if name.starts_with("__") {
                     if let Ok(n) = name[2..].parse::<usize>() {

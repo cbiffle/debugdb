@@ -24,9 +24,9 @@ impl<A: Load, B: Load> Load for (A, B) {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if let Type::Struct(s) = ty {
             if s.tuple_like {
-                let m0 = s.members.get("__0").ok_or("missing __0")?;
+                let m0 = s.unique_member("__0").ok_or("missing __0")?;
                 let m0ty = world.type_by_id(m0.type_id).unwrap();
-                let m1 = s.members.get("__1").ok_or("missing __1")?;
+                let m1 = s.unique_member("__1").ok_or("missing __1")?;
                 let m1ty = world.type_by_id(m1.type_id).unwrap();
                 Ok((
                     A::from_buffer(

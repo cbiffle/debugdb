@@ -500,7 +500,7 @@ impl DebugDbBuilder {
                     for ttp in &s.template_type_parameters {
                         check(ttp.type_id)?;
                     }
-                    for m in s.members.values() {
+                    for m in &s.members {
                         check(m.type_id)?;
                     }
                 }

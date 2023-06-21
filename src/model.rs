@@ -280,9 +280,23 @@ pub struct Struct {
     /// recorded in the order they appear in the debug info, which in practice
     /// is also the order they're declared in the source. They are _not_ in
     /// order of position in the struct in memory.
-    pub members: IndexMap<String, Member>,
+    pub members: Vec<Member>,
     /// Location in debug info.
     pub offset: gimli::UnitSectionOffset,
+}
+
+impl Struct {
+    pub fn unique_member(&self, name: &str) -> Option<&Member> {
+        let mut matches = self.members.iter()
+            .filter(|m| m.name.as_ref().map(String::as_str) == Some(name));
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            // There is no _unique_ member by this name.
+            None
+        } else {
+            Some(first)
+        }
+    }
 }
 
 /// An "enum type," in the Rust sense of the term, is a tagged union (or

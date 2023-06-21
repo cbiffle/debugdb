@@ -293,7 +293,7 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
                 }
                 if !s.members.is_empty() {
                     println!("- members:");
-                    for (i, mem) in s.members.values().enumerate() {
+                    for (i, mem) in s.members.iter().enumerate() {
                         if let Some(name) = &mem.name {
                             println!("  {i}. {name}: {}", NamedGoff(db, mem.type_id));
                         } else {
@@ -521,13 +521,13 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
                 } else {
                     if s.tuple_like {
                         println!("(");
-                        for mem in s.members.values() {
+                        for mem in &s.members {
                             println!("    {},", db.type_name(mem.type_id).unwrap());
                         }
                         println!(");");
                     } else {
                         println!(" {{");
-                        for mem in s.members.values() {
+                        for mem in &s.members {
                             if let Some(name) = &mem.name {
                                 println!("    {}: {},", name, db.type_name(mem.type_id).unwrap());
                             } else {
@@ -564,14 +564,14 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
                             if !s.members.is_empty() {
                                 if s.tuple_like {
                                     println!("(");
-                                    for mem in s.members.values() {
+                                    for mem in &s.members {
                                         let mtn = db.type_name(mem.type_id).unwrap();
                                         println!("        {},", mtn);
                                     }
                                     print!("    )");
                                 } else {
                                     println!(" {{");
-                                    for mem in s.members.values() {
+                                    for mem in &s.members {
                                         let mtn = db.type_name(mem.type_id).unwrap();
                                         println!("        {}: {},", mem.name.as_ref().unwrap(), mtn);
                                     }
@@ -598,14 +598,14 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
                                 if !s.members.is_empty() {
                                     if s.tuple_like {
                                         println!("(");
-                                        for mem in s.members.values() {
+                                        for mem in &s.members {
                                             let mtn = db.type_name(mem.type_id).unwrap();
                                             println!("        {},", mtn);
                                         }
                                         print!("    )");
                                     } else {
                                         println!(" {{");
-                                        for mem in s.members.values() {
+                                        for mem in &s.members {
                                             let mtn = db.type_name(mem.type_id).unwrap();
                                             println!("        {}: {},", mem.name.as_ref().unwrap(), mtn);
                                         }
@@ -895,7 +895,7 @@ fn offset_to_path(
         Type::Struct(s) => {
             // This is where an offsetof-to-member index would be convenient
 
-            for m in s.members.values() {
+            for m in &s.members {
                 if offset < m.location {
                     continue;
                 }
@@ -983,7 +983,7 @@ fn struct_picture(db: &DebugDb, s: &Struct, width: usize) {
     struct_picture_inner(
         db,
         s.byte_size,
-        s.members.values().enumerate().map(|(i, m)| (i, m, true)),
+        s.members.iter().enumerate().map(|(i, m)| (i, m, true)),
         width,
     )
 }
