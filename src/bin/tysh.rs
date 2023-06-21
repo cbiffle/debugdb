@@ -1081,6 +1081,7 @@ fn enum_picture(db: &DebugDb, s: &Enum, width: usize) {
                     Some("body".to_string())
                 }
             });
+            /*
             for (disc, var) in variants {
                 let show_disc = if let Some(v) = disc {
                     print!("DISC == {v:#x} => body: ");
@@ -1112,6 +1113,7 @@ fn enum_picture(db: &DebugDb, s: &Enum, width: usize) {
                     _ => println!("(can't display non-struct)"),
                 }
             }
+            */
         }
     }
 }
