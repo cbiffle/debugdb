@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -5,7 +6,7 @@ struct Sketch {
     filename: std::path::PathBuf,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let args = Sketch::parse();
 
     let buffer = std::fs::read(args.filename)?;

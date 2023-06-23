@@ -1,20 +1,35 @@
-use std::fmt::Display;
+use std::{fmt::Display, io::BufRead};
 
+use anyhow::Result;
 use clap::Parser;
-use rangemap::RangeMap;
+use debugdb::value::ValueWithDb;
+use object::{Object, ObjectSegment};
+use rangemap::{RangeMap, RangeInclusiveMap};
 
-use debugdb::{Type, Encoding, TypeId, Struct, Member, DebugDb, Enum, VariantShape};
+use debugdb::{Type, Encoding, TypeId, Struct, Member, DebugDb, Enum, VariantShape, value::Value};
+use debugdb::load::{Load, ImgMachine};
+use regex::Regex;
 
 #[derive(Debug, Parser)]
 struct TySh {
     filename: std::path::PathBuf,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let args = TySh::parse();
 
     let buffer = std::fs::read(args.filename)?;
     let object = object::File::parse(&*buffer)?;
+    let mut segments = RangeInclusiveMap::new();
+    for seg in object.segments() {
+        if seg.size() == 0 {
+            continue;
+        }
+        segments.insert(
+            seg.address()..=seg.address() + (seg.size() - 1),
+            seg.data()?.to_vec(),
+        );
+    }
     let everything = debugdb::parse_file(&object)?;
 
     println!("Loaded; {} types found in program.", everything.type_count());
@@ -22,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut rl = rustyline::Editor::<(), _>::new()?;
     let prompt = ansi_term::Colour::Green.paint(">> ").to_string();
+    let mut ctx = Ctx { segments };
     'lineloop:
     loop {
         match rl.readline(&prompt) {
@@ -39,14 +55,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "exit" => break,
                     "help" => {
                         println!("commands:");
+                        let name_len = COMMANDS.iter()
+                            .map(|(name, _, _)| name.len())
+                            .max()
+                            .unwrap_or(12);
                         for (name, _, desc) in COMMANDS {
-                            println!("{:12} {}", name, desc);
+                            println!("{:name_len$} {}", name, desc);
                         }
                     }
                     _ => {
                         for (name, imp, _) in COMMANDS {
                             if *name == cmd {
-                                imp(&everything, rest);
+                                imp(&everything, &mut ctx, rest);
                                 continue 'lineloop;
                             }
                         }
@@ -109,11 +129,16 @@ impl std::fmt::Display for NamedGoff<'_> {
     }
 }
 
-type Command = fn(&debugdb::DebugDb, &str);
+struct Ctx {
+    segments: RangeInclusiveMap<u64, Vec<u8>>,
+}
+
+type Command = fn(&debugdb::DebugDb, &mut Ctx, &str);
 
 static COMMANDS: &[(&str, Command, &str)] = &[
     ("list", cmd_list, "print names of ALL types, or types containing a string"),
     ("info", cmd_info, "print a summary of a type"),
+    ("load", cmd_load, "loads additional segment data"),
     ("def", cmd_def, "print a type as a pseudo-Rust definition"),
     ("sizeof", cmd_sizeof, "print size of type in bytes"),
     ("alignof", cmd_alignof, "print alignment of type in bytes"),
@@ -123,10 +148,15 @@ static COMMANDS: &[(&str, Command, &str)] = &[
     ("vars", cmd_vars, "list static variables"),
     ("var", cmd_var, "get info on a static variable"),
     ("unwind", cmd_unwind, "get unwind info for an address"),
+    ("decode", cmd_decode, "interpret RAM/ROM as a type"),
+    ("decode-async", cmd_decode_async, "interpret RAM/ROM as a suspended future"),
+    ("decode-blob", cmd_decode_blob, "attempt to interpret bytes as a type"),
+    ("decode-async-blob", cmd_decode_async_blob, "attempt to interpret bytes as a suspended future"),
 ];
 
 fn cmd_list(
     db: &debugdb::DebugDb,
+    _ctx: &mut Ctx,
     args: &str,
 ) {
     // We're gonna make a copy to sort it, because alphabetical order seems
@@ -249,7 +279,7 @@ fn simple_query_cmd(
     }
 }
 
-fn cmd_info(db: &debugdb::DebugDb, args: &str) {
+fn cmd_info(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         match t {
             Type::Base(s) => {
@@ -445,7 +475,7 @@ fn cmd_info(db: &debugdb::DebugDb, args: &str) {
     })
 }
 
-fn cmd_sizeof(db: &debugdb::DebugDb, args: &str) {
+fn cmd_sizeof(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         if let Some(sz) = t.byte_size(db) {
             println!("{} bytes", sz);
@@ -455,7 +485,7 @@ fn cmd_sizeof(db: &debugdb::DebugDb, args: &str) {
     })
 }
 
-fn cmd_alignof(db: &debugdb::DebugDb, args: &str) {
+fn cmd_alignof(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         if let Some(sz) = t.alignment(db) {
             println!("align to {} bytes", sz);
@@ -465,7 +495,7 @@ fn cmd_alignof(db: &debugdb::DebugDb, args: &str) {
     })
 }
 
-fn cmd_def(db: &debugdb::DebugDb, args: &str) {
+fn cmd_def(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     simple_query_cmd(db, args, |db, t| {
         println!();
         match t {
@@ -673,7 +703,7 @@ fn cmd_def(db: &debugdb::DebugDb, args: &str) {
     })
 }
 
-fn cmd_addr2line(db: &debugdb::DebugDb, args: &str) {
+fn cmd_addr2line(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     let addr = if args.starts_with("0x") {
         if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
             a
@@ -706,7 +736,7 @@ fn cmd_addr2line(db: &debugdb::DebugDb, args: &str) {
     }
 }
 
-fn cmd_addr2stack(db: &debugdb::DebugDb, args: &str) {
+fn cmd_addr2stack(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     let addr = if args.starts_with("0x") {
         if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
             a
@@ -725,7 +755,7 @@ fn cmd_addr2stack(db: &debugdb::DebugDb, args: &str) {
     let dim = ansi_term::Style::new().dimmed();
 
     match db.static_stack_for_pc(addr) {
-        Ok(trc) => {
+        Ok(Some(trc)) => {
             println!("Static stack trace fragment for address 0x{:x}", addr);
             println!("(innermost / most recent first)");
             for (i, record) in trc.iter().rev().enumerate() {
@@ -753,13 +783,16 @@ fn cmd_addr2stack(db: &debugdb::DebugDb, args: &str) {
                 println!();
             }
         }
+        Ok(None) => {
+            println!("no stack information available for address {addr:#x?}");
+        }
         Err(e) => {
-            println!("failed: {}", e);
+            println!("failed: {e}");
         }
     }
 }
 
-fn cmd_vars(db: &debugdb::DebugDb, args: &str) {
+fn cmd_vars(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     for (_id, v) in db.static_variables() {
         if !args.is_empty() {
             if !v.name.contains(args) {
@@ -772,7 +805,7 @@ fn cmd_vars(db: &debugdb::DebugDb, args: &str) {
     }
 }
 
-fn cmd_var(db: &debugdb::DebugDb, args: &str) {
+fn cmd_var(db: &debugdb::DebugDb, ctx: &mut Ctx, args: &str) {
     let results = db.static_variables_by_name(args).collect::<Vec<_>>();
 
     match results.len() {
@@ -785,10 +818,21 @@ fn cmd_var(db: &debugdb::DebugDb, args: &str) {
         println!("{} @ {}", v.name, Goff(v.offset));
         println!("- type: {}", NamedGoff(db, v.type_id));
         println!("- address: 0x{:x}", v.location);
+        let Some(ty) = db.type_by_id(v.type_id) else { continue };
+
+        match Value::from_state(&ctx.segments, v.location, db, &ty) {
+            Ok(v) => {
+                println!("- current contents: {}",
+                    ValueWithDb(v, db));
+            }
+            Err(e) => {
+                println!("- unable to display: {e}");
+            }
+        }
     }
 }
 
-fn cmd_addr(db: &debugdb::DebugDb, args: &str) {
+fn cmd_addr(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     let addr = if args.starts_with("0x") {
         if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
             a
@@ -838,7 +882,7 @@ fn cmd_addr(db: &debugdb::DebugDb, args: &str) {
                 println!("- range 0x{:x}..0x{:x}", 
                     e.range.start, e.range.end);
                 match db.static_stack_for_pc(addr) {
-                    Ok(trc) => {
+                    Ok(Some(trc)) => {
                         println!("- stack fragment with inlines:");
                         for (i, record) in trc.iter().rev().enumerate() {
                             let subp = db.subprogram_by_id(record.subprogram).unwrap();
@@ -864,6 +908,9 @@ fn cmd_addr(db: &debugdb::DebugDb, args: &str) {
                             print!("{}", dim.suffix());
                             println!();
                         }
+                    }
+                    Ok(None) => {
+                        println!("- no stack fragment is available");
                     }
                     Err(e) => {
                         println!("- could not get stack fragment: {}", e);
@@ -918,7 +965,7 @@ fn offset_to_path(
     }
 }
 
-fn cmd_unwind(db: &debugdb::DebugDb, args: &str) {
+fn cmd_unwind(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     let addr = if args.starts_with("0x") {
         if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
             a
@@ -1187,4 +1234,463 @@ fn byte_picture(
         print!("------+");
     }
     println!();
+}
+
+fn cmd_decode(db: &debugdb::DebugDb, ctx: &mut Ctx, args: &str) {
+    let (addrstr, typestr) = if let Some(space) = args.find(' ') {
+        args.split_at(space)
+    } else {
+        println!("usage: decode [addr] [typename blah blah]");
+        return;
+    };
+    let addr = match parse_int::parse::<u64>(addrstr) {
+        Ok(x) => x,
+        Err(e) => {
+            println!("bad address: {e}");
+            return;
+        }
+    };
+    let types: Vec<_> = match parse_type_name(typestr.trim()) {
+        None => return,
+        Some(ParsedTypeName::Name(n)) => {
+            db.types_by_name(n).collect()
+        }
+        Some(ParsedTypeName::Goff(o)) => {
+            db.type_by_id(o).into_iter()
+                .map(|t| (o, t))
+                .collect()
+        }
+    };
+
+    let many = match types.len() {
+        0 => {
+            println!("{}", ansi_term::Colour::Red.paint("No types found."));
+            return;
+        }
+        1 => false,
+        n => {
+            println!("{}{} types found with that name:",
+                ansi_term::Color::Yellow.paint("note: "),
+                n,
+            );
+            true
+        }
+    };
+
+    for (goff, t) in types {
+        if many { println!() }
+        println!("{}: ", NamedGoff(db, goff));
+        match Value::from_state(&ctx.segments, addr, db, t) {
+            Ok(v) => {
+                println!("{}", ValueWithDb(v, db));
+            }
+            Err(e) => {
+                println!("could not parse as this type: {e}");
+            }
+        }
+    }
+}
+
+fn cmd_decode_async(db: &debugdb::DebugDb, ctx: &mut Ctx, args: &str) {
+    let (addrstr, typestr) = if let Some(space) = args.find(' ') {
+        args.split_at(space)
+    } else {
+        println!("usage: decode-async [addr] [typename blah blah]");
+        return;
+    };
+    let addr = match parse_int::parse::<u64>(addrstr) {
+        Ok(x) => x,
+        Err(e) => {
+            println!("bad address: {e}");
+            return;
+        }
+    };
+    let types: Vec<_> = match parse_type_name(typestr.trim()) {
+        None => return,
+        Some(ParsedTypeName::Name(n)) => {
+            db.types_by_name(n).collect()
+        }
+        Some(ParsedTypeName::Goff(o)) => {
+            db.type_by_id(o).into_iter()
+                .map(|t| (o, t))
+                .collect()
+        }
+    };
+
+    let many = match types.len() {
+        0 => {
+            println!("{}", ansi_term::Colour::Red.paint("No types found."));
+            return;
+        }
+        1 => false,
+        n => {
+            println!("{}{} types found with that name:",
+                ansi_term::Color::Yellow.paint("note: "),
+                n,
+            );
+            true
+        }
+    };
+
+    for (goff, t) in types {
+        if many { println!() }
+        println!("{}: ", NamedGoff(db, goff));
+        let mut v = &match Value::from_state(&ctx.segments, addr, db, t) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("could not parse as this type: {e}");
+                return;
+            }
+        };
+        let parts = Regex::new(r#"^(.*)::\{async_fn_env#0\}(<.*)?$"#).unwrap();
+        let suspend_state = Regex::new(r#"::Suspend([0-9]+)$"#).unwrap();
+        let mut first = true;
+        let bold = ansi_term::Style::new().bold();
+        loop {
+            if !first {
+                print!("waiting on: ");
+            }
+            first = false;
+            let Value::Enum(e) = v else {
+                println!("{}hand-rolled future{}", bold.prefix(), bold.suffix());
+                println!("    type: {}", v.type_name());
+                break;
+            };
+            let Some(parts) = parts.captures(&e.name) else {
+                println!("(name is weird for an async fn env)");
+                break;
+            };
+            let name = &parts[1];
+            let parms = parts.get(2).map(|m| m.as_str()).unwrap_or("");
+            println!("async fn {}{name}{parms}{}", bold.prefix(), bold.suffix());
+            let state = &e.disc;
+            let state_name = &e.value.name;
+
+            if state_name.ends_with("Unresumed") {
+                println!("    future has not yet been polled");
+                break;
+            } else if state_name.ends_with("Returned") {
+                println!("    future has already resolved");
+                break;
+            } else if state_name.ends_with("Panicked") {
+                println!("    future panicked on previous poll");
+                break;
+            } else if let Some(sc) = suspend_state.captures(state_name) {
+                if let Ok(n) = sc[1].parse::<usize>() {
+                    println!("    suspended at await point {n}");
+                } else {
+                    println!("    unrecognized state {state}: {state_name}");
+                }
+            } else {
+                println!("    unrecognized state {state}: {state_name}");
+            }
+
+            let mut awaitees = e.value.members_named("__awaitee");
+            let Some(awaitee) = awaitees.next() else {
+                println!(" (stopped unexpectedly)");
+                break;
+            };
+            if awaitees.next().is_some() {
+                println!(" (multiple __awaitee fields)");
+                break;
+            }
+            v = awaitee;
+        }
+    }
+}
+
+fn cmd_decode_blob(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
+    let type_name = args.trim();
+    let types: Vec<_> = match parse_type_name(type_name) {
+        None => return,
+        Some(ParsedTypeName::Name(n)) => {
+            db.types_by_name(n).collect()
+        }
+        Some(ParsedTypeName::Goff(o)) => {
+            db.type_by_id(o).into_iter()
+                .map(|t| (o, t))
+                .collect()
+        }
+    };
+
+    let many = match types.len() {
+        0 => {
+            println!("{}", ansi_term::Colour::Red.paint("No types found."));
+            return;
+        }
+        1 => false,
+        n => {
+            println!("{}{} types found with that name:",
+                ansi_term::Color::Yellow.paint("note: "),
+                n,
+            );
+            true
+        }
+    };
+
+    println!("Paste hex-encoded memory blob. Whitespace OK.");
+    println!("Address prefix ending in colon will be removed.");
+    println!("Enter a blank line to end.");
+
+    let stdin = std::io::stdin().lock();
+    let mut img = vec![];
+    for line in stdin.lines() {
+        let line = match line {
+            Err(e) => {
+                println!("input error: {e}");
+                return;
+            }
+            Ok(v) => v,
+        };
+        let mut line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(colon) = line.find(':') {
+            line = &line.split_at(colon).1[1..];
+        }
+
+        let mut hexits = vec![];
+        for b in line.bytes() {
+            match b {
+                b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f' => {
+                    hexits.push(b);
+                }
+                b' ' | b'\t' | b'\r' | b'\n' => (),
+                _ => {
+                    println!("unexpected byte in input: {b:#x?}");
+                    return;
+                }
+            }
+        }
+
+        let bytes = hexits.chunks_exact(2)
+            .map(|chunk| u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16))
+            .collect::<Result<Vec<_>, _>>();
+        match bytes {
+            Err(e) => {
+                println!("couldn't parse that: {e}");
+                return;
+            }
+            Ok(b) => img.extend(b),
+        }
+    }
+
+    for (goff, t) in types {
+        if many { println!() }
+        println!("{}: ", NamedGoff(db, goff));
+        let Some(size) = t.byte_size(db) else {
+            println!("  (type is unsized, cannot decode)");
+            continue;
+        };
+        let Ok(size) = usize::try_from(size) else {
+            println!("  (type too big for this platform)");
+            continue;
+        };
+        let mut this_img = img.clone();
+        if size > this_img.len() {
+            println!("(padding entered data to {size} bytes)");
+            this_img.resize(size, 0);
+        }
+        let machine = ImgMachine::new(this_img);
+        match Value::from_state(&machine, 0, db, t) {
+            Ok(v) => {
+                println!("{}", ValueWithDb(v, db));
+            }
+            Err(e) => {
+                println!("could not parse as this type: {e}");
+            }
+        }
+    }
+}
+
+fn cmd_decode_async_blob(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
+    let type_name = args.trim();
+    let types: Vec<_> = match parse_type_name(type_name) {
+        None => return,
+        Some(ParsedTypeName::Name(n)) => {
+            db.types_by_name(n).collect()
+        }
+        Some(ParsedTypeName::Goff(o)) => {
+            db.type_by_id(o).into_iter()
+                .map(|t| (o, t))
+                .collect()
+        }
+    };
+
+    let many = match types.len() {
+        0 => {
+            println!("{}", ansi_term::Colour::Red.paint("No types found."));
+            return;
+        }
+        1 => false,
+        n => {
+            println!("{}{} types found with that name:",
+                ansi_term::Color::Yellow.paint("note: "),
+                n,
+            );
+            true
+        }
+    };
+
+    println!("Paste hex-encoded memory blob. Whitespace OK.");
+    println!("Address prefix ending in colon will be removed.");
+    println!("Enter a blank line to end.");
+
+    let stdin = std::io::stdin().lock();
+    let mut img = vec![];
+    for line in stdin.lines() {
+        let line = match line {
+            Err(e) => {
+                println!("input error: {e}");
+                return;
+            }
+            Ok(v) => v,
+        };
+        let mut line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(colon) = line.find(':') {
+            line = &line.split_at(colon).1[1..];
+        }
+
+        let mut hexits = vec![];
+        for b in line.bytes() {
+            match b {
+                b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f' => {
+                    hexits.push(b);
+                }
+                b' ' | b'\t' | b'\r' | b'\n' => (),
+                _ => {
+                    println!("unexpected byte in input: {b:#x?}");
+                    return;
+                }
+            }
+        }
+
+        let bytes = hexits.chunks_exact(2)
+            .map(|chunk| u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16))
+            .collect::<Result<Vec<_>, _>>();
+        match bytes {
+            Err(e) => {
+                println!("couldn't parse that: {e}");
+                return;
+            }
+            Ok(b) => img.extend(b),
+        }
+    }
+
+    for (goff, t) in types {
+        if many { println!() }
+        println!("{}: ", NamedGoff(db, goff));
+        let Some(size) = t.byte_size(db) else {
+            println!("  (type is unsized, cannot decode)");
+            continue;
+        };
+        let Ok(size) = usize::try_from(size) else {
+            println!("  (type too big for this platform)");
+            continue;
+        };
+        let mut this_img = img.clone();
+        if size > this_img.len() {
+            println!("(padding entered data to {size} bytes)");
+            this_img.resize(size, 0);
+        }
+        let machine = ImgMachine::new(this_img);
+        let mut v = &match Value::from_state(&machine, 0, db, t) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("could not parse as this type: {e}");
+                return;
+            }
+        };
+        let parts = Regex::new(r#"^(.*)::\{async_fn_env#0\}(<.*)?$"#).unwrap();
+        let suspend_state = Regex::new(r#"::Suspend([0-9]+)$"#).unwrap();
+        let mut first = true;
+        loop {
+            if !first {
+                print!("waiting on: ");
+            }
+            first = false;
+            let Value::Enum(e) = v else {
+                println!("hand-rolled future");
+                println!("    type: {}", v.type_name());
+                break;
+            };
+            let Some(parts) = parts.captures(&e.name) else {
+                println!("(name is weird for an async fn env)");
+                break;
+            };
+            let name = &parts[1];
+            let parms = parts.get(2).map(|m| m.as_str()).unwrap_or("");
+            println!("async fn {name}{parms}");
+            let state = &e.disc;
+            let state_name = &e.value.name;
+
+            if state_name.ends_with("Unresumed") {
+                println!("    future has not yet been polled");
+                break;
+            } else if state_name.ends_with("Returned") {
+                println!("    future has already resolved");
+                break;
+            } else if state_name.ends_with("Panicked") {
+                println!("    future panicked on previous poll");
+                break;
+            } else if let Some(sc) = suspend_state.captures(state_name) {
+                if let Ok(n) = sc[1].parse::<usize>() {
+                    println!("    suspended at await point {n}");
+                } else {
+                    println!("    unrecognized state {state}: {state_name}");
+                }
+            } else {
+                println!("    unrecognized state {state}: {state_name}");
+            }
+
+            let mut awaitees = e.value.members_named("__awaitee");
+            let Some(awaitee) = awaitees.next() else {
+                println!(" (stopped unexpectedly)");
+                break;
+            };
+            if awaitees.next().is_some() {
+                println!(" (multiple __awaitee fields)");
+                break;
+            }
+            v = awaitee;
+        }
+    }
+}
+
+
+fn cmd_load(
+    _db: &debugdb::DebugDb,
+    ctx: &mut Ctx,
+    args: &str,
+) {
+    let args = args.trim();
+    let words = args.split_whitespace().collect::<Vec<_>>();
+    if words.len() != 2 {
+        println!("usage: load [filename] [address]");
+        return;
+    }
+    let filename = words[0];
+    let address = match parse_int::parse::<u64>(words[1]) {
+        Ok(a) => a,
+        Err(e) => {
+            println!("bad address: {e}");
+            return;
+        }
+    };
+
+    let image = match std::fs::read(filename) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            println!("unable to read file: {e}");
+            return;
+        }
+    };
+
+    let end = address + u64::try_from(image.len()).unwrap();
+
+    ctx.segments.insert(address..=end, image);
 }

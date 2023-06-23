@@ -90,7 +90,7 @@ impl Type {
                 let eltty = world.type_by_id(a.element_type_id)?;
                 eltty.alignment(world)
             }
-            Self::Pointer(_) => Some(world.pointer_size()),
+            Self::Pointer(_) => Some(world.pointer_size() as u64),
 
             _ => None,
         }
@@ -116,7 +116,7 @@ impl Type {
 
     pub(crate) fn byte_size_early<'a>(
         &'a self,
-        pointer_size: u64,
+        pointer_size: usize,
         lookup_type: impl Fn(TypeId) -> Option<&'a Type>,
     ) -> Option<u64> {
         let mut factor = 1;
@@ -129,7 +129,7 @@ impl Type {
                         factor *= a.count?;
                         t = lookup_type(a.element_type_id)?;
                     }
-                    Self::Pointer(_) => break Some(factor * pointer_size),
+                    Self::Pointer(_) => break Some(factor * pointer_size as u64),
                     Self::Subroutine(_) => break None,
 
                     _ => panic!("inconsistency btw byte_size_early and inherent_byte_size"),

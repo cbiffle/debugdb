@@ -9,12 +9,15 @@ pub mod unify;
 mod dwarf_parser;
 
 use crate::unify::Unify;
+use crate::dwarf_parser::ParseError;
 
 pub use self::model::*;
 
 use object::{Object, ObjectSection};
+use thiserror::Error;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 // Internal type abbreviations
@@ -105,7 +108,7 @@ impl DebugDb {
     }
 
     /// Gets the size of a pointer in the program, in bytes.
-    pub fn pointer_size(&self) -> u64 {
+    pub fn pointer_size(&self) -> usize {
         if self.is_64 {
             8
         } else {
@@ -255,14 +258,14 @@ impl DebugDb {
     pub fn static_stack_for_pc(
         &self,
         pc: u64,
-    ) -> Result<Vec<PcInfo>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Vec<PcInfo>>, ParseError> {
         // Find subprogram containing PC.
-        let (pid, subp) = self.subprograms()
+        let Some((pid, subp)) = self.subprograms()
             .find(|(_, subp)| subp.pc_range
                 .as_ref()
                 .map(|r| r.contains(&pc))
                 .unwrap_or(false))
-            .ok_or("enclosing subprogram not found")?;
+            else { return Ok(None); };
 
         let mut frag = vec![];
 
@@ -306,7 +309,7 @@ impl DebugDb {
             });
         }
 
-        Ok(frag)
+        Ok(Some(frag))
     }
 
     /// Returns an iterator over all static variables defined in this program.
@@ -328,6 +331,19 @@ impl DebugDb {
         name: &str,
     ) -> impl Iterator<Item = (VarId, &StaticVariable)> + '_ {
         self.consult_index_generic(&self.variables_by_name, name, &self.variables)
+    }
+
+    pub fn unique_static_variable_by_name(
+        &self,
+        name: &str,
+    ) -> Option<(VarId, &StaticVariable)> {
+        let mut vs = self.static_variables_by_name(name);
+        let result = vs.next()?;
+        if vs.next().is_some() {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     pub fn entities_by_address(
@@ -416,7 +432,7 @@ impl DebugDbBuilder {
         }
     }
 
-    pub fn build(self) -> Result<DebugDb, Box<dyn std::error::Error>> {
+    pub fn build(self) -> Result<DebugDb, ParseError> {
         let mut types = self.types;
 
         // Build type name index.
@@ -477,7 +493,7 @@ impl DebugDbBuilder {
 
         let mut unresolved_types = BTreeMap::new();
 
-        let mut check = |mut id| -> Result<(), Box<dyn std::error::Error>> {
+        let mut check = |mut id| -> Result<(), Infallible> {
             id = u.canonicalize(id);
             if types.contains_key(&id) {
                 Ok(())
@@ -608,9 +624,9 @@ impl DebugDbBuilder {
             }
         }
 
-        fn check_inl(inl: &InlinedSubroutine) -> Result<(), Box<dyn std::error::Error>> {
+        fn check_inl(inl: &InlinedSubroutine) -> Result<(), ParseError> {
             if inl.abstract_origin.is_none() {
-                return Err(format!("inlined subroutine w/o abstract origin at {:?}", inl.offset).into());
+                return Err(ParseError::UnboundSubroutine(inl.offset));
             }
             for inner in &inl.inlines {
                 check_inl(inner)?;
@@ -723,10 +739,20 @@ where
     index
 }
 
+#[derive(Clone, Debug, Error)]
+pub enum FileError {
+    #[error("DWARF data structures could not be understood")]
+    Parse(#[from] ParseError),
+    #[error("Object file format parsing error")]
+    Obj(#[from] object::Error),
+    #[error("DWARF failed to parse")]
+    Dwarf(#[from] gimli::Error),
+}
+
 /// Parses type information from an `object::File`.
 pub fn parse_file<'a>(
     object: &'a object::File,
-) -> Result<DebugDb, Box<dyn std::error::Error>> {
+) -> Result<DebugDb, FileError> {
     let endian = if object.is_little_endian() {
         gimli::RunTimeEndian::Little
     } else {
@@ -734,7 +760,7 @@ pub fn parse_file<'a>(
     };
 
     let load_section =
-        |id: gimli::SectionId| -> Result<RtArcReader, Box<dyn std::error::Error>> {
+        |id: gimli::SectionId| -> Result<RtArcReader, FileError> {
             let cow = object.section_by_name(id.name())
                 .map(|sect| sect.uncompressed_data())
                 .transpose()?
@@ -809,7 +835,7 @@ pub fn parse_file<'a>(
         }
     }
 
-    builder.build()
+    Ok(builder.build()?)
 }
 
 #[derive(Clone, Debug)]

@@ -5,16 +5,35 @@
 
 use crate::{DebugDbBuilder, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, RtArcReader, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine, StaticVariable};
 use indexmap::IndexMap;
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, convert::Infallible};
+use thiserror::Error;
 
-use gimli::constants as gim_con;
+use gimli::{constants as gim_con, UnitSectionOffset};
+
+#[derive(Clone, Debug, Error)]
+pub enum ParseError {
+    #[error("invalid DWARF")]
+    Dwarf(#[from] gimli::Error),
+    #[error("attribute {0}: expected string value")]
+    AttrNotString(gim_con::DwAt),
+    #[error("path entry was not a string")]
+    PathNotString,
+    #[error("inlined subroutine w/o abstract origin at {0:x?}")]
+    UnboundSubroutine(UnitSectionOffset<usize>),
+}
+
+impl From<Infallible> for ParseError {
+    fn from(x: Infallible) -> Self {
+        match x {}
+    }
+}
 
 pub fn parse_entry(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
 
     let mut attrs = entry.attrs();
@@ -42,7 +61,7 @@ fn handle_nested_types(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     if let Some(child) = cursor.current() {
         match child.tag() {
             gim_con::DW_TAG_base_type => {
@@ -94,7 +113,7 @@ fn parse_namespace(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_namespace);
     let mut name = None;
@@ -103,7 +122,7 @@ fn parse_namespace(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             _ => (),
         }
@@ -132,7 +151,7 @@ fn parse_base_type(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_base_type);
 
@@ -146,7 +165,7 @@ fn parse_base_type(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
@@ -166,7 +185,7 @@ fn parse_base_type(
                         gim_con::DW_ATE_complex_float => Encoding::ComplexFloat,
                         gim_con::DW_ATE_UTF => Encoding::UtfChar,
                         _ => {
-                            eprintln!("base type {name:?} will be ignored; unsupported encoding {e:?}");
+                            eprintln!("WARN: base type {name:?} will be ignored; unsupported encoding {e:?}");
                             return skip_entry(cursor); // TODO
                         }
                     });
@@ -197,7 +216,7 @@ fn parse_structure_type(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_structure_type);
 
@@ -211,7 +230,7 @@ fn parse_structure_type(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
@@ -231,7 +250,7 @@ fn parse_structure_type(
     let mut variant_parts = vec![];
 
     let Some(name) = name else {
-        eprintln!("unnamed struct type");
+        eprintln!("WARN: unnamed struct type at {:x?}", TypeId(offset));
         return skip_entry(cursor);
     };
 
@@ -268,7 +287,7 @@ fn parse_structure_type(
                     break;
                 }
             }
-            Ok::<_, Box<dyn std::error::Error>>(())
+            Ok::<_, ParseError>(())
         })?;
     }
 
@@ -323,7 +342,7 @@ fn parse_template_type_parameter(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<TemplateTypeParameter, Box<dyn std::error::Error>> {
+) -> Result<TemplateTypeParameter, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_template_type_parameter);
 
@@ -334,7 +353,7 @@ fn parse_template_type_parameter(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
@@ -361,7 +380,7 @@ fn parse_member(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<Member, Box<dyn std::error::Error>> {
+) -> Result<Member, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_member);
 
@@ -375,7 +394,7 @@ fn parse_member(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_artificial => match attr.value() {
                 gimli::AttributeValue::Flag(f) => {
@@ -424,7 +443,7 @@ fn parse_variant_part(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<VariantShape, Box<dyn std::error::Error>> {
+) -> Result<VariantShape, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_variant_part);
 
@@ -502,7 +521,7 @@ fn parse_variant(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<(Option<u64>, Variant), Box<dyn std::error::Error>> {
+) -> Result<(Option<u64>, Variant), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_variant);
 
@@ -553,7 +572,7 @@ fn parse_enumeration_type(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_enumeration_type);
 
@@ -567,7 +586,7 @@ fn parse_enumeration_type(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
@@ -602,7 +621,7 @@ fn parse_enumeration_type(
                     break;
                 }
             }
-            Ok::<_, Box<dyn std::error::Error>>(())
+            Ok::<_, ParseError>(())
         })?;
     }
 
@@ -624,7 +643,7 @@ fn parse_enumerator(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<Enumerator, Box<dyn std::error::Error>> {
+) -> Result<Enumerator, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_enumerator);
 
@@ -635,7 +654,7 @@ fn parse_enumerator(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_const_value => {
                 const_value = Some(
@@ -666,7 +685,7 @@ fn parse_array_type(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_array_type);
 
@@ -729,7 +748,7 @@ fn parse_subrange_type(
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
 ) -> Result<
     (TypeId, u64, Option<u64>),
-    Box<dyn std::error::Error>,
+    ParseError,
 > {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_subrange_type);
@@ -786,7 +805,7 @@ fn parse_pointer_type(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_pointer_type);
 
@@ -798,7 +817,7 @@ fn parse_pointer_type(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
@@ -820,7 +839,7 @@ fn parse_pointer_type(
     }
 
     if type_id.is_none() {
-        eprintln!("WARN: skipping pointer type w/o typeid");
+        eprintln!("WARN: pointer type missing pointee typeid at: {:x?}", offset);
         return skip_entry(cursor);
     }
 
@@ -853,7 +872,7 @@ fn parse_union_type(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_union_type);
 
@@ -866,7 +885,7 @@ fn parse_union_type(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_byte_size => {
                 byte_size = Some(attr.value().udata_value().unwrap());
@@ -886,7 +905,7 @@ fn parse_union_type(
     let mut members = vec![];
 
     let Some(name) = name else {
-        eprintln!("skipping nameless union at: {:x?}", offset);
+        eprintln!("WARN: skipping nameless union at: {:x?}", offset);
         return skip_entry(cursor);
     };
     if entry.has_children() {
@@ -912,7 +931,7 @@ fn parse_union_type(
                     break;
                 }
             }
-            Ok::<_, Box<dyn std::error::Error>>(())
+            Ok::<_, ParseError>(())
         })?;
     }
 
@@ -934,7 +953,7 @@ fn parse_subroutine_type(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_subroutine_type);
 
@@ -991,7 +1010,7 @@ fn parse_formal_parameter(
     _dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<TypeId, Box<dyn std::error::Error>> {
+) -> Result<TypeId, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
 
@@ -1022,9 +1041,9 @@ fn parse_formal_parameter(
 
 fn get_attr_string<'a>(
     dwarf: &'a gimli::Dwarf<RtArcReader>,
-    attrval: gimli::AttributeValue<RtArcReader>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    match attrval {
+    attr: &gimli::Attribute<RtArcReader>,
+) -> Result<String, ParseError> {
+    match attr.value() {
         gimli::AttributeValue::DebugStrRef(offset) => {
             if let Ok(s) = dwarf.debug_str.get_str(offset) {
                 Ok(String::from_utf8_lossy(s.bytes()).into_owned())
@@ -1042,13 +1061,47 @@ fn get_attr_string<'a>(
         gimli::AttributeValue::String(data) => {
             Ok(String::from_utf8_lossy(data.bytes()).into_owned()) // TODO hack
         }
-        _ => Err(format!("expected string, got: {:?}", attrval).into()),
+        _ => Err(ParseError::AttrNotString(attr.name())),
+    }
+}
+
+fn get_path<'a>(
+    dwarf: &'a gimli::Dwarf<RtArcReader>,
+    attrval: gimli::AttributeValue<RtArcReader>,
+) -> Result<String, ParseError> {
+    match attrval {
+        gimli::AttributeValue::DebugLineStrRef(offset) => {
+            if let Ok(s) = dwarf.debug_line_str.get_str(offset) {
+                Ok(String::from_utf8_lossy(s.bytes()).into_owned())
+            } else {
+                Ok(format!("<.debug_line_str+0x{:08x}>", offset.0))
+            }
+        }
+
+        gimli::AttributeValue::String(data) => {
+            Ok(String::from_utf8_lossy(data.bytes()).into_owned()) // TODO hack
+        }
+
+        // These cases may not be necessary, I've turned them off until they
+        // prove so.
+
+        /*
+        gimli::AttributeValue::DebugStrRef(offset) => {
+            if let Ok(s) = dwarf.debug_str.get_str(offset) {
+                Ok(String::from_utf8_lossy(s.bytes()).into_owned())
+            } else {
+                Ok(format!("<.debug_str+0x{:08x}>", offset.0))
+            }
+        }
+        */
+
+        _ => Err(ParseError::PathNotString),
     }
 }
 
 fn skip_entry(
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
 
     /*
@@ -1087,7 +1140,7 @@ fn parse_subprogram(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_subprogram);
     let mut name = None;
@@ -1103,10 +1156,10 @@ fn parse_subprogram(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_linkage_name => {
-                linkage_name = Some(get_attr_string(dwarf, attr.value())?);
+                linkage_name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_noreturn => match attr.value() {
                 gimli::AttributeValue::Flag(f) => {
@@ -1118,11 +1171,11 @@ fn parse_subprogram(
                 if let gimli::AttributeValue::FileIndex(f) = attr.value() {
                     if let Some(lp) = &unit.line_program {
                         if let Some(fent) = lp.header().file(f) {
-                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            let file = get_path(dwarf, fent.path_name())?;
                             if let Some(dv) = fent.directory(lp.header()) {
                                 decl_coord.file = Some(format!(
                                     "{}/{}",
-                                    get_attr_string(dwarf, dv)?,
+                                    get_path(dwarf, dv)?,
                                     file,
                                 ));
                             } else {
@@ -1253,7 +1306,7 @@ fn parse_sub_parameter(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<SubParameter, Box<dyn std::error::Error>> {
+) -> Result<SubParameter, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_formal_parameter);
 
@@ -1267,7 +1320,7 @@ fn parse_sub_parameter(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
@@ -1295,11 +1348,11 @@ fn parse_sub_parameter(
                 if let gimli::AttributeValue::FileIndex(f) = attr.value() {
                     if let Some(lp) = &unit.line_program {
                         if let Some(fent) = lp.header().file(f) {
-                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            let file = get_path(dwarf, fent.path_name())?;
                             if let Some(dv) = fent.directory(lp.header()) {
                                 decl_coord.file = Some(format!(
                                     "{}/{}",
-                                    get_attr_string(dwarf, dv)?,
+                                    get_path(dwarf, dv)?,
                                     file,
                                 ));
                             } else {
@@ -1347,7 +1400,7 @@ fn parse_inlined_subroutine(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
-) -> Result<InlinedSubroutine, Box<dyn std::error::Error>> {
+) -> Result<InlinedSubroutine, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_inlined_subroutine);
 
@@ -1375,11 +1428,11 @@ fn parse_inlined_subroutine(
                 if let gimli::AttributeValue::FileIndex(f) = attr.value() {
                     if let Some(lp) = &unit.line_program {
                         if let Some(fent) = lp.header().file(f) {
-                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            let file = get_path(dwarf, fent.path_name())?;
                             if let Some(dv) = fent.directory(lp.header()) {
                                 call_coord.file = Some(format!(
                                     "{}/{}",
-                                    get_attr_string(dwarf, dv)?,
+                                    get_path(dwarf, dv)?,
                                     file,
                                 ));
                             } else {
@@ -1478,7 +1531,7 @@ fn parse_static_variable(
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
     builder: &mut DebugDbBuilder,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_variable);
 
@@ -1494,10 +1547,10 @@ fn parse_static_variable(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_name => {
-                name = Some(get_attr_string(dwarf, attr.value())?);
+                name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_linkage_name => {
-                linkage_name = Some(get_attr_string(dwarf, attr.value())?);
+                linkage_name = Some(get_attr_string(dwarf, &attr)?);
             }
             gim_con::DW_AT_location => {
                 let e = attr.exprloc_value().unwrap();
@@ -1547,11 +1600,11 @@ fn parse_static_variable(
                 if let gimli::AttributeValue::FileIndex(f) = attr.value() {
                     if let Some(lp) = &unit.line_program {
                         if let Some(fent) = lp.header().file(f) {
-                            let file = get_attr_string(dwarf, fent.path_name())?;
+                            let file = get_path(dwarf, fent.path_name())?;
                             if let Some(dv) = fent.directory(lp.header()) {
                                 decl.file = Some(format!(
                                     "{}/{}",
-                                    get_attr_string(dwarf, dv)?,
+                                    get_path(dwarf, dv)?,
                                     file,
                                 ));
                             } else {
