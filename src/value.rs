@@ -60,6 +60,7 @@ impl Value {
                 Base::U32(_) => "u32".into(),
                 Base::U64(_) => "u64".into(),
                 Base::Bool(_) => "bool".into(),
+                Base::Unit => "()".into(),
             },
             Self::Struct(s) => (&s.name).into(),
             Self::CEnum(s) => (&s.name).into(),
@@ -105,6 +106,7 @@ impl Value {
                 Base::Bool(0) => write!(f, "false"),
                 Base::Bool(1) => write!(f, "true"),
                 Base::Bool(x) => write!(f, "{x}_bool"),
+                Base::Unit => write!(f, "()"),
             },
             Self::Pointer(p) => {
                 let nearest = world.entities_by_address(p.value)
@@ -303,6 +305,7 @@ impl Load for Value {
 
 #[derive(Copy, Clone, Debug)]
 pub enum Base {
+    Unit,
     U8(u8),
     U32(u32),
     U64(u64),
@@ -353,6 +356,7 @@ impl Load for Base {
                 addr,
                 1,
             )?.ok_or(LoadError::DataUnavailable)? as u8)),
+            (Encoding::Unsigned, 0) => Ok(Base::Unit),
             _ => {
                 println!("{:?} {}", b.encoding, b.byte_size);
                 return Err(LoadError::UnsupportedType);
