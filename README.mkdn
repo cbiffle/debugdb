@@ -9,6 +9,11 @@ can:
 - Provide basic reflection of data structures within a program memory image,
   e.g. load a struct into a map-like type given the ID of a type in the program.
 
+For a somewhat hacked-up but detailed example of what you can do with this
+crate, see `src/bin/tysh.rs`, which provides an interactive shell for answering
+questions about types in a program. Wondering about the concrete memory layout
+of a Rust enum in your program? `tysh` will literally draw you a picture of it.
+
 # Focus
 
 This is mostly focused on embedded Rust programs, specifically those built with
