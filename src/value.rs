@@ -116,7 +116,7 @@ impl Value {
                         None
                     })
                     .min_by_key(|(_, range)| range.start.abs_diff(p.value));
-                if let Some((vid, range)) = nearest {
+                if let Some((vid, _range)) = nearest {
                     let var = world.static_variable_by_id(vid).unwrap();
                     let name = &var.name;
                     let prefix = if p.is_probably_mut() {
