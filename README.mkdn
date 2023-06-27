@@ -1,0 +1,59 @@
+# debugdb: a program analysis crate
+
+This is an attempt at a general debug information loading and analysis crate. It
+can:
+
+- Read the DWARF information for a subset of programs (primarily focused on Rust
+  but with some C support).
+- Answer questions about it.
+- Provide basic reflection of data structures within a program memory image,
+  e.g. load a struct into a map-like type given the ID of a type in the program.
+
+# Focus
+
+This is mostly focused on embedded Rust programs, specifically those built with
+release settings and LTO (because doing so dramatically simplifies the debug
+info). It has limited support for
+
+- Unix programs,
+- C programs, and
+- Type unification across compile units for programs not built with LTO.
+
+# Hack alert
+
+Significant portions of this crate were written after consuming too much
+caffeine and immersing myself in the DWARF spec, which is a document that tends
+to warp your mind. This code could use a good rewritin' and refactorin', but
+unfortunately it works pretty well, which has reduced my motivation to do so.
+Wanna help?
+
+# This crate attempts to be strict
+
+This crate may crash when you feed it a program. Believe it or not, this is
+deliberate! In my experience a lot of DWARF loaders will silently skip over
+information they don't understand, which can cause them to miss important
+portions of the DWARF spec or misinterpret certain programs.
+
+This crate attempts to make a one-sided error in the other direction:
+
+- If it can load a program, its interpretation is probably correct. (If not,
+  report a bug please!)
+- If it hits a DWARF feature, or use of a DWARF feature, that it doesn't either
+  explicitly support or explicitly ignore, it will reject the program.
+
+This can be kind of annoying, particularly since compilers don't bother to
+version their debug info, so small changes can require updates to this crate.
+However, it also means this crate gets a bunch of things _right_ that I've seen
+others get wrong.
+
+That's not to suggest the crate is perfect. This crate almost certainly contains
+bugs, because the DWARF spec is huge and ambiguous, and compilers are
+inconsistent about whether they actually follow it. But it means the bugs fall
+into two categories:
+
+- If a program loads, and the interpretation is wrong, there's a serious and
+  genuine bug in the crate's logic.
+
+- If a program does not load, extending this crate to cover it is more of a
+  feature request than a bug. Which is not to suggest it's not important -- just
+  that the sort of work required will be different.
