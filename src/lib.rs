@@ -13,7 +13,7 @@ use crate::dwarf_parser::ParseError;
 
 pub use self::model::*;
 
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
 use thiserror::Error;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -99,6 +99,9 @@ pub struct DebugDb {
 
     // TODO
     pub debug_frame: gimli::DebugFrame<gimli::EndianReader<gimli::RunTimeEndian, Arc<[u8]>>>,
+
+    raw_symbols_by_address: BTreeMap<u64, BTreeSet<String>>,
+    raw_symbols_by_name: BTreeMap<String, BTreeSet<u64>>,
 }
 
 impl DebugDb {
@@ -312,6 +315,29 @@ impl DebugDb {
         Ok(Some(frag))
     }
 
+    pub fn unique_raw_symbol_by_name(
+        &self,
+        name: &str,
+    ) -> Option<u64> {
+        let addresses = self.raw_symbols_by_name.get(name)?;
+        let mut i = addresses.iter().cloned();
+        let result = i.next()?;
+        if i.next().is_some() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    pub fn raw_symbols_for_address(
+        &self,
+        address: u64,
+    ) -> impl Iterator<Item = &str> {
+        self.raw_symbols_by_address.get(&address)
+            .into_iter()
+            .flat_map(|set| set.iter().map(String::as_str))
+    }
+
     /// Returns an iterator over all static variables defined in this program.
     pub fn static_variables(
         &self,
@@ -409,6 +435,8 @@ pub struct DebugDbBuilder {
     subprograms: BTreeMap<ProgramId, Subprogram>,
     line_table: BTreeMap<u64, Vec<LineNumberRow>>,
     variables: BTreeMap<VarId, StaticVariable>,
+
+    raw_symbols: Vec<(String, u64)>,
 }
 
 impl DebugDbBuilder {
@@ -429,6 +457,7 @@ impl DebugDbBuilder {
             subprograms: BTreeMap::new(),
             line_table: BTreeMap::new(),
             variables: BTreeMap::new(),
+            raw_symbols: vec![],
         }
     }
 
@@ -643,6 +672,17 @@ impl DebugDbBuilder {
 
         let type_rcanon = invert(&type_canon);
 
+        let raw_symbols_by_name = index_by_key(
+            self.raw_symbols.iter().map(|(k, v)| (v, k)),
+            |_, name| Some(name.to_string()),
+        );
+
+        let raw_symbols_by_address = index_by_key(
+            self.raw_symbols.iter().map(|(k, v)| (k, v)),
+            |_, addr| Some(*addr),
+        );
+
+
         Ok(DebugDb {
             endian: self.endian,
             types,
@@ -658,7 +698,13 @@ impl DebugDbBuilder {
             subroutine_index,
             variables_by_name,
             entities_by_address,
+            raw_symbols_by_name,
+            raw_symbols_by_address,
         })
+    }
+
+    pub fn record_raw_symbol(&mut self, addr: u64, name: String) {
+        self.raw_symbols.push((name, addr));
     }
 
     /// Adds a type to the database.
@@ -833,6 +879,12 @@ pub fn parse_file<'a>(
             }
             dwarf_parser::parse_entry(&dwarf, &unit, &mut entries, &mut builder)?;
         }
+    }
+
+    for sym in object.symbols() {
+        let Ok(name) = sym.name() else { continue; };
+        let addr = sym.address();
+        builder.record_raw_symbol(addr, name.to_string());
     }
 
     Ok(builder.build()?)
