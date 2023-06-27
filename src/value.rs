@@ -391,6 +391,16 @@ impl Struct {
             .map(|(_, value)| value)
     }
 
+    pub fn unique_member_named<'s>(&'s self, name: &str) -> Option<&'s Value> {
+        let mut m = self.members_named(name);
+        let r = m.next()?;
+        if m.next().is_some() {
+            None
+        } else {
+            Some(r)
+        }
+    }
+
     pub fn any_member_named(&self, name: &str) -> Option<&Value> {
         self.members.iter()
             .find(|(n, _)| n.as_deref() == Some(name))
