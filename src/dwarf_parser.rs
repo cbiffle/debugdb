@@ -225,6 +225,7 @@ fn parse_structure_type(
     let mut byte_size = None;
     let mut alignment = None;
     let mut decl = false;
+    let mut decl_coord = DeclCoord::default();
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
@@ -240,6 +241,36 @@ fn parse_structure_type(
             }
             gim_con::DW_AT_declaration => {
                 decl = true;
+            }
+            gim_con::DW_AT_decl_file => {
+                if let gimli::AttributeValue::FileIndex(f) = attr.value() {
+                    if let Some(lp) = &unit.line_program {
+                        if let Some(fent) = lp.header().file(f) {
+                            let file = get_path(dwarf, fent.path_name())?;
+                            if let Some(dv) = fent.directory(lp.header()) {
+                                decl_coord.file = Some(format!(
+                                    "{}/{}",
+                                    get_path(dwarf, dv)?,
+                                    file,
+                                ));
+                            } else {
+                                decl_coord.file = Some(file);
+                            }
+                        } else {
+                            eprintln!("WARN: invalid file index");
+                        }
+                    } else {
+                        eprintln!("WARN: missing line program");
+                    }
+                } else {
+                    eprintln!("WARN: unexpected decl_file type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_line => {
+                decl_coord.line = NonZeroU64::new(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_decl_column => {
+                decl_coord.column = NonZeroU64::new(attr.value().udata_value().unwrap());
             }
             _ => (),
         }
@@ -313,6 +344,7 @@ fn parse_structure_type(
             offset,
             members,
             tuple_like,
+            decl_coord,
         });
     } else if variant_parts.len() == 1 {
         assert!(
@@ -389,6 +421,7 @@ fn parse_member(
     let mut alignment = None;
     let mut location = None;
     let mut artificial = false;
+    let mut decl_coord = DeclCoord::default();
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
@@ -419,6 +452,36 @@ fn parse_member(
             gim_con::DW_AT_data_member_location => {
                 location = Some(attr.value().udata_value().unwrap());
             }
+            gim_con::DW_AT_decl_file => {
+                if let gimli::AttributeValue::FileIndex(f) = attr.value() {
+                    if let Some(lp) = &unit.line_program {
+                        if let Some(fent) = lp.header().file(f) {
+                            let file = get_path(dwarf, fent.path_name())?;
+                            if let Some(dv) = fent.directory(lp.header()) {
+                                decl_coord.file = Some(format!(
+                                    "{}/{}",
+                                    get_path(dwarf, dv)?,
+                                    file,
+                                ));
+                            } else {
+                                decl_coord.file = Some(file);
+                            }
+                        } else {
+                            eprintln!("WARN: invalid file index");
+                        }
+                    } else {
+                        eprintln!("WARN: missing line program");
+                    }
+                } else {
+                    eprintln!("WARN: unexpected decl_file type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_line => {
+                decl_coord.line = NonZeroU64::new(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_decl_column => {
+                decl_coord.column = NonZeroU64::new(attr.value().udata_value().unwrap());
+            }
             _ => (),
         }
     }
@@ -436,6 +499,7 @@ fn parse_member(
         alignment,
         location,
         offset,
+        decl_coord,
     })
 }
 
@@ -527,12 +591,43 @@ fn parse_variant(
 
     let offset = entry.offset().to_unit_section_offset(unit);
     let mut discr_value = None;
+    let mut decl_coord = DeclCoord::default();
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_discr_value => {
                 discr_value = Some(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_decl_file => {
+                if let gimli::AttributeValue::FileIndex(f) = attr.value() {
+                    if let Some(lp) = &unit.line_program {
+                        if let Some(fent) = lp.header().file(f) {
+                            let file = get_path(dwarf, fent.path_name())?;
+                            if let Some(dv) = fent.directory(lp.header()) {
+                                decl_coord.file = Some(format!(
+                                    "{}/{}",
+                                    get_path(dwarf, dv)?,
+                                    file,
+                                ));
+                            } else {
+                                decl_coord.file = Some(file);
+                            }
+                        } else {
+                            eprintln!("WARN: invalid file index");
+                        }
+                    } else {
+                        eprintln!("WARN: missing line program");
+                    }
+                } else {
+                    eprintln!("WARN: unexpected decl_file type: {:?}", attr.value());
+                }
+            }
+            gim_con::DW_AT_decl_line => {
+                decl_coord.line = NonZeroU64::new(attr.value().udata_value().unwrap());
+            }
+            gim_con::DW_AT_decl_column => {
+                decl_coord.column = NonZeroU64::new(attr.value().udata_value().unwrap());
             }
             _ => (),
         }
@@ -564,7 +659,7 @@ fn parse_variant(
     }
     let member = members.into_iter().next().unwrap();
 
-    Ok((discr_value, Variant { member, offset }))
+    Ok((discr_value, Variant { member, offset, decl_coord }))
 }
 
 fn parse_enumeration_type(

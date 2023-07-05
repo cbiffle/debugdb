@@ -307,6 +307,19 @@ fn cmd_info(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
                 } else {
                     println!("struct type");
                 }
+                if s.decl_coord.is_useful() {
+                    print!("- declared at: {}", s.decl_coord.file.as_deref().unwrap_or("???"));
+                    if let Some(n) = s.decl_coord.line {
+                        print!(":{n}");
+                    } else {
+                        print!(":???");
+                    }
+                    // Be more tolerant of missing column number.
+                    if let Some(n) = s.decl_coord.column {
+                        print!(":{n}");
+                    }
+                    println!();
+                }
                 if let Some(z) = s.byte_size {
                     println!("- byte size: {z}");
                 }

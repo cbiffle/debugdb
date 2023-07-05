@@ -283,6 +283,8 @@ pub struct Struct {
     pub members: Vec<Member>,
     /// Location in debug info.
     pub offset: gimli::UnitSectionOffset,
+    /// Location of the declaration of this subprogram in the source.
+    pub decl_coord: DeclCoord,
 }
 
 impl Struct {
@@ -493,6 +495,7 @@ pub struct Member {
     pub location: u64,
     /// Location in debug info.
     pub offset: gimli::UnitSectionOffset,
+    pub decl_coord: DeclCoord,
 }
 
 /// Description of the potential variant shapes for a Rust-style enum (tagged
@@ -532,6 +535,7 @@ pub struct Variant {
     pub member: Member,
     /// Location in debug info.
     pub offset: gimli::UnitSectionOffset,
+    pub decl_coord: DeclCoord,
 }
 
 /// One of the options in a C-style enum type.
@@ -621,7 +625,7 @@ pub struct SubParameter {
 ///
 /// Note that, in accordance with tradition, both lines and columns are numbered
 /// starting at one.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeclCoord {
     /// Path to source file, if available.
     pub file: Option<String>,
@@ -629,6 +633,12 @@ pub struct DeclCoord {
     pub line: Option<NonZeroU64>,
     /// Column number, if available.
     pub column: Option<NonZeroU64>,
+}
+
+impl DeclCoord {
+    pub fn is_useful(&self) -> bool {
+        self.file.is_some() || self.line.is_some() || self.column.is_some()
+    }
 }
 
 /// Information about a subroutine that has been inlined into a subprogram.
