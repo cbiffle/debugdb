@@ -19,6 +19,7 @@ clap = { version = "4.3.5", features = ["derive"] }
 thiserror = "1.0.40"
 regex = "1.8.4"
 parse_int = "0.6.0"
+portable-atomic = "1.6.0"
 
 [profile.release]
 debug = true
