@@ -347,7 +347,8 @@ impl Load for portable_atomic::AtomicU32 {
         };
         if imp.name != "portable_atomic::imp::interrupt::AtomicU32" {
             return Err(LoadError::WrongTypeName {
-                expected: "portable_atomic::imp::interrupt::AtomicU32".to_string(),
+                expected: "portable_atomic::imp::interrupt::AtomicU32"
+                    .to_string(),
                 got: imp.name.clone(),
             });
         }
@@ -526,6 +527,28 @@ pub(crate) fn load_unsigned<M: Machine>(
             2 => u64::from(endian.read_u16(buffer)),
             4 => u64::from(endian.read_u32(buffer)),
             8 => endian.read_u64(buffer),
+            _ => unimplemented!(),
+        })
+    })
+}
+
+pub(crate) fn load_signed<M: Machine>(
+    endian: gimli::RunTimeEndian,
+    machine: &M,
+    addr: u64,
+    size: usize,
+) -> Result<Option<i64>, M::Error> {
+    let mut buffer = [0; 8];
+    let buffer = &mut buffer[..size];
+    let n = machine.read_memory(addr, buffer)?;
+    Ok(if n < size {
+        None
+    } else {
+        Some(match size {
+            1 => i64::from(buffer[0]),
+            2 => i64::from(endian.read_i16(buffer)),
+            4 => i64::from(endian.read_i32(buffer)),
+            8 => endian.read_i64(buffer),
             _ => unimplemented!(),
         })
     })
