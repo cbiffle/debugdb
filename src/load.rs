@@ -322,6 +322,60 @@ impl Load for core::sync::atomic::AtomicU32 {
     }
 }
 
+impl Load for portable_atomic::AtomicU32 {
+    fn from_state<M: Machine>(
+        machine: &M,
+        addr: u64,
+        world: &DebugDb,
+        ty: &Type,
+    ) -> Result<Self, LoadError<M::Error>> {
+        let Type::Struct(ty) = ty else {
+            return Err(LoadError::NotAStruct);
+        };
+        if ty.name != "portable_atomic::AtomicU32" {
+            return Err(LoadError::WrongTypeName {
+                expected: "portable_atomic::AtomicU32".to_string(),
+                got: ty.name.clone(),
+            });
+        }
+        let Some(m_inner) = ty.unique_member("inner") else {
+            return Err(LoadError::MissingMember("inner".to_string()));
+        };
+        let imp = world.type_by_id(m_inner.type_id).unwrap();
+        let Type::Struct(imp) = imp else {
+            return Err(LoadError::NotAStruct);
+        };
+        if imp.name != "portable_atomic::imp::interrupt::AtomicU32" {
+            return Err(LoadError::WrongTypeName {
+                expected: "portable_atomic::imp::interrupt::AtomicU32"
+                    .to_string(),
+                got: imp.name.clone(),
+            });
+        }
+        let Some(m_v) = imp.unique_member("v") else {
+            return Err(LoadError::MissingMember("v".to_string()));
+        };
+        let unsafecell = world.type_by_id(m_v.type_id).unwrap();
+        let Type::Struct(unsafecell) = unsafecell else {
+            return Err(LoadError::NotAStruct);
+        };
+        if unsafecell.name != "core::cell::UnsafeCell<u32>" {
+            return Err(LoadError::WrongTypeName {
+                expected: "core::cell::UnsafeCell<u32>".to_string(),
+                got: unsafecell.name.clone(),
+            });
+        }
+        let Some(m_value) = unsafecell.unique_member("value") else {
+            return Err(LoadError::MissingMember("value".to_string()));
+        };
+
+        let value_ty = world.type_by_id(m_value.type_id).unwrap();
+
+        let x = u32::from_state(machine, addr, world, value_ty)?;
+        Ok(portable_atomic::AtomicU32::new(x))
+    }
+}
+
 impl<T: Load> Load for Vec<T> {
     fn from_state<M: Machine>(
         machine: &M,
@@ -473,6 +527,28 @@ pub(crate) fn load_unsigned<M: Machine>(
             2 => u64::from(endian.read_u16(buffer)),
             4 => u64::from(endian.read_u32(buffer)),
             8 => endian.read_u64(buffer),
+            _ => unimplemented!(),
+        })
+    })
+}
+
+pub(crate) fn load_signed<M: Machine>(
+    endian: gimli::RunTimeEndian,
+    machine: &M,
+    addr: u64,
+    size: usize,
+) -> Result<Option<i64>, M::Error> {
+    let mut buffer = [0; 8];
+    let buffer = &mut buffer[..size];
+    let n = machine.read_memory(addr, buffer)?;
+    Ok(if n < size {
+        None
+    } else {
+        Some(match size {
+            1 => i64::from(buffer[0]),
+            2 => i64::from(endian.read_i16(buffer)),
+            4 => i64::from(endian.read_i32(buffer)),
+            8 => endian.read_i64(buffer),
             _ => unimplemented!(),
         })
     })

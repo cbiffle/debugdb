@@ -5,7 +5,7 @@
 
 use regex::Regex;
 
-use crate::load::{choose_variant, load_unsigned, Load, LoadError, Machine};
+use crate::load::{choose_variant, load_unsigned, load_signed, Load, LoadError, Machine};
 use crate::{Encoding, Type, DebugDb, TypeId, EntityId};
 use std::borrow::Cow;
 use std::convert::TryFrom;
@@ -57,8 +57,13 @@ impl Value {
             }
             Self::Base(b) => match b {
                 Base::U8(_) => "u8".into(),
+                Base::U16(_) => "u16".into(),
                 Base::U32(_) => "u32".into(),
                 Base::U64(_) => "u64".into(),
+                Base::I8(_) => "i8".into(),
+                Base::I16(_) => "i16".into(),
+                Base::I32(_) => "i32".into(),
+                Base::I64(_) => "i64".into(),
                 Base::Bool(_) => "bool".into(),
                 Base::Unit => "()".into(),
             },
@@ -101,8 +106,13 @@ impl Value {
         match self {
             Self::Base(b) => match b {
                 Base::U8(x) => write!(f, "{x}_u8"),
+                Base::U16(x) => write!(f, "{x}_u16"),
                 Base::U32(x) => write!(f, "{x}_u32"),
                 Base::U64(x) => write!(f, "{x}_u64"),
+                Base::I8(x) => write!(f, "{x}_i8"),
+                Base::I16(x) => write!(f, "{x}_i16"),
+                Base::I32(x) => write!(f, "{x}_i32"),
+                Base::I64(x) => write!(f, "{x}_i64"),
                 Base::Bool(0) => write!(f, "false"),
                 Base::Bool(1) => write!(f, "true"),
                 Base::Bool(x) => write!(f, "{x}_bool"),
@@ -307,8 +317,13 @@ impl Load for Value {
 pub enum Base {
     Unit,
     U8(u8),
+    U16(u16),
     U32(u32),
     U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
     Bool(u8),
 }
 
@@ -316,6 +331,7 @@ impl Base {
     pub fn as_u64(self) -> Option<u64> {
         match self {
             Self::U8(x) => return Some(u64::from(x)),
+            Self::U16(x) => return Some(u64::from(x)),
             Self::U32(x) => return Some(u64::from(x)),
             Self::U64(x) => return Some(x),
             _ => None,
@@ -332,30 +348,42 @@ impl Load for Base {
     ) -> Result<Self, LoadError<M::Error>> {
         let Type::Base(b) = ty else { return Err(LoadError::NotABase); };
         match (b.encoding, b.byte_size) {
-            (Encoding::Unsigned, 1) => Ok(Base::U8(load_unsigned(
-                world.endian(),
-                machine,
-                addr,
-                1,
-            )?.ok_or(LoadError::DataUnavailable)? as u8)),
-            (Encoding::Unsigned, 4) => Ok(Base::U32(load_unsigned(
-                world.endian(),
-                machine,
-                addr,
-                4,
-            )?.ok_or(LoadError::DataUnavailable)? as u32)),
-            (Encoding::Unsigned, 8) => Ok(Base::U64(load_unsigned(
-                world.endian(),
-                machine,
-                addr,
-                8,
-            )?.ok_or(LoadError::DataUnavailable)?)),
-            (Encoding::Boolean, 1) => Ok(Base::Bool(load_unsigned(
-                world.endian(),
-                machine,
-                addr,
-                1,
-            )?.ok_or(LoadError::DataUnavailable)? as u8)),
+            (Encoding::Unsigned, 1) => Ok(Base::U8(
+                load_unsigned(world.endian(), machine, addr, 1)?
+                    .ok_or(LoadError::DataUnavailable)? as u8,
+            )),
+            (Encoding::Unsigned, 2) => Ok(Base::U16(
+                load_unsigned(world.endian(), machine, addr, 4)?
+                    .ok_or(LoadError::DataUnavailable)? as u16,
+            )),
+            (Encoding::Unsigned, 4) => Ok(Base::U32(
+                load_unsigned(world.endian(), machine, addr, 4)?
+                    .ok_or(LoadError::DataUnavailable)? as u32,
+            )),
+            (Encoding::Unsigned, 8) => Ok(Base::U64(
+                load_unsigned(world.endian(), machine, addr, 8)?
+                    .ok_or(LoadError::DataUnavailable)?,
+            )),
+            (Encoding::Signed, 1) => Ok(Base::I8(
+                load_signed(world.endian(), machine, addr, 1)?
+                    .ok_or(LoadError::DataUnavailable)? as i8,
+            )),
+            (Encoding::Signed, 2) => Ok(Base::I16(
+                load_signed(world.endian(), machine, addr, 4)?
+                    .ok_or(LoadError::DataUnavailable)? as i16,
+            )),
+            (Encoding::Signed, 4) => Ok(Base::I32(
+                load_signed(world.endian(), machine, addr, 4)?
+                    .ok_or(LoadError::DataUnavailable)? as i32,
+            )),
+            (Encoding::Signed, 8) => Ok(Base::I64(
+                load_signed(world.endian(), machine, addr, 8)?
+                    .ok_or(LoadError::DataUnavailable)?,
+            )),
+            (Encoding::Boolean, 1) => Ok(Base::Bool(
+                load_unsigned(world.endian(), machine, addr, 1)?
+                    .ok_or(LoadError::DataUnavailable)? as u8,
+            )),
             (Encoding::Unsigned, 0) => Ok(Base::Unit),
             _ => {
                 println!("{:?} {}", b.encoding, b.byte_size);
