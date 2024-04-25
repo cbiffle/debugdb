@@ -3,6 +3,10 @@
 //! This consumes DWARF debug info sections by recursive descent, building up
 //! our data model.
 
+// There are a lot of cases where I'm matching on something and expect to add
+// more cases later. In such cases I don't _want_ to rephrase it as an if let.
+#![allow(clippy::single_match)]
+
 use crate::{DebugDbBuilder, Encoding, Base, Struct, Enum, Variant, VariantShape, TemplateTypeParameter, Member, TypeId, CEnum, Union, Enumerator, Array, Pointer, RtArcReader, Subroutine, DeclCoord, Subprogram, SubParameter, InlinedSubroutine, StaticVariable};
 use indexmap::IndexMap;
 use std::{num::NonZeroU64, convert::Infallible};
@@ -37,13 +41,13 @@ pub fn parse_entry(
     let entry = cursor.current().unwrap();
 
     let mut attrs = entry.attrs();
-    while let Some(_) = attrs.next()? {
+    while attrs.next()?.is_some() {
         // discard
     }
 
     if entry.has_children() {
         while let Some(()) = cursor.next_entry()? {
-            if let Some(_) = cursor.current() {
+            if cursor.current().is_some() {
                 handle_nested_types(dwarf, unit, cursor, builder)?;
             } else {
                 break;
@@ -132,8 +136,8 @@ fn parse_namespace(
 
     if entry.has_children() {
         builder.path_component(name, |builder| {
-            while let Some(()) = cursor.next_entry()? {
-                if let Some(_) = cursor.current() {
+            while cursor.next_entry()?.is_some() {
+                if cursor.current().is_some() {
                     handle_nested_types(dwarf, unit, cursor, builder)?;
                 } else {
                     break;
@@ -328,8 +332,8 @@ fn parse_structure_type(
         // or a tuple struct.
         let tuple_like = members.iter().enumerate().all(|(i, m)| {
             if let Some(name) = &m.name {
-                if name.starts_with("__") {
-                    if let Ok(n) = name[2..].parse::<usize>() {
+                if let Some(rest) = name.strip_prefix("__") {
+                    if let Ok(n) = rest.parse::<usize>() {
                         return n == i;
                     }
                 }
@@ -389,7 +393,7 @@ fn parse_template_type_parameter(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    type_id = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -437,7 +441,7 @@ fn parse_member(
             },
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    type_id = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -518,7 +522,7 @@ fn parse_variant_part(
         match attr.name() {
             gim_con::DW_AT_discr => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    discr = Some(o.to_unit_section_offset(&unit));
+                    discr = Some(o.to_unit_section_offset(unit));
                 } else {
                     panic!("unexpected discr type: {:?}", attr.value());
                 }
@@ -555,7 +559,7 @@ fn parse_variant_part(
         panic!("Variant parts are expected to have a single member; this one has {}", members.len());
     }
 
-    let shape = if variants.len() == 0 {
+    let shape = if variants.is_empty() {
         VariantShape::Zero
     } else if variants.len() == 1 {
         if variants.keys().next().unwrap().is_some() {
@@ -804,7 +808,7 @@ fn parse_array_type(
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    element_type_id = Some(o.to_unit_section_offset(&unit));
+                    element_type_id = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -869,7 +873,7 @@ fn parse_subrange_type(
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    type_id = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -893,12 +897,8 @@ fn parse_subrange_type(
 
     if entry.has_children() {
         while let Some(()) = cursor.next_entry()? {
-            if let Some(child) = cursor.current() {
-                match child.tag() {
-                    _ => {
-                        skip_entry(cursor)?;
-                    }
-                }
+            if cursor.current().is_some() {
+                skip_entry(cursor)?;
             } else {
                 break;
             }
@@ -928,7 +928,7 @@ fn parse_pointer_type(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    type_id = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -954,12 +954,8 @@ fn parse_pointer_type(
 
     if entry.has_children() {
         while let Some(()) = cursor.next_entry()? {
-            if let Some(child) = cursor.current() {
-                match child.tag() {
-                    _ => {
-                        skip_entry(cursor)?;
-                    }
-                }
+            if cursor.current().is_some() {
+                skip_entry(cursor)?;
             } else {
                 break;
             }
@@ -1072,7 +1068,7 @@ fn parse_subroutine_type(
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    return_type_id = Some(TypeId(o.to_unit_section_offset(&unit)));
+                    return_type_id = Some(TypeId(o.to_unit_section_offset(unit)));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -1128,7 +1124,7 @@ fn parse_formal_parameter(
         match attr.name() {
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    type_id = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -1146,8 +1142,8 @@ fn parse_formal_parameter(
     Ok(type_id)
 }
 
-fn get_attr_string<'a>(
-    dwarf: &'a gimli::Dwarf<RtArcReader>,
+fn get_attr_string(
+    dwarf: &gimli::Dwarf<RtArcReader>,
     attr: &gimli::Attribute<RtArcReader>,
 ) -> Result<String, ParseError> {
     match attr.value() {
@@ -1172,8 +1168,8 @@ fn get_attr_string<'a>(
     }
 }
 
-fn get_path<'a>(
-    dwarf: &'a gimli::Dwarf<RtArcReader>,
+fn get_path(
+    dwarf: &gimli::Dwarf<RtArcReader>,
     attrval: gimli::AttributeValue<RtArcReader>,
 ) -> Result<String, ParseError> {
     match attrval {
@@ -1231,7 +1227,7 @@ fn skip_entry(
 
     if entry.has_children() {
         while let Some(()) = cursor.next_entry()? {
-            if let Some(_) = cursor.current() {
+            if cursor.current().is_some() {
                 skip_entry(cursor)?;
             } else {
                 break;
@@ -1316,7 +1312,7 @@ fn parse_subprogram(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    return_type_id = Some(TypeId(o.to_unit_section_offset(&unit)));
+                    return_type_id = Some(TypeId(o.to_unit_section_offset(unit)));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -1327,7 +1323,7 @@ fn parse_subprogram(
             }
             gim_con::DW_AT_abstract_origin => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    abstract_origin = Some(o.to_unit_section_offset(&unit));
+                    abstract_origin = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -1431,7 +1427,7 @@ fn parse_sub_parameter(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    type_id = Some(TypeId(o.to_unit_section_offset(&unit)));
+                    type_id = Some(TypeId(o.to_unit_section_offset(unit)));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -1442,7 +1438,7 @@ fn parse_sub_parameter(
             }
             gim_con::DW_AT_abstract_origin => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    abstract_origin = Some(o.to_unit_section_offset(&unit));
+                    abstract_origin = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -1573,7 +1569,7 @@ fn parse_inlined_subroutine(
             }
             gim_con::DW_AT_abstract_origin => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    abstract_origin = Some(o.to_unit_section_offset(&unit));
+                    abstract_origin = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {
@@ -1694,7 +1690,7 @@ fn parse_static_variable(
             }
             gim_con::DW_AT_type => {
                 if let gimli::AttributeValue::UnitRef(o) = attr.value() {
-                    type_id = Some(o.to_unit_section_offset(&unit));
+                    type_id = Some(o.to_unit_section_offset(unit));
                 } else if let gimli::AttributeValue::DebugInfoRef(o) =
                     attr.value()
                 {

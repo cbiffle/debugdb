@@ -169,7 +169,7 @@ impl Type {
             }
             Self::Array(a) => {
                 let eltname = world
-                    .type_by_id(a.element_type_id.into())
+                    .type_by_id(a.element_type_id)
                     .map(|t| t.name(world))
                     .unwrap_or("???".into());
 
@@ -290,7 +290,7 @@ pub struct Struct {
 impl Struct {
     pub fn unique_member(&self, name: &str) -> Option<&Member> {
         let mut matches = self.members.iter()
-            .filter(|m| m.name.as_ref().map(String::as_str) == Some(name));
+            .filter(|m| m.name.as_deref() == Some(name));
         let first = matches.next()?;
         if matches.next().is_some() {
             // There is no _unique_ member by this name.

@@ -435,7 +435,7 @@ pub(crate) fn choose_variant<'e, M: Machine>(
 ) -> Result<&'e Variant, LoadError<M::Error>> {
     match &e.shape {
         VariantShape::Zero => {
-            return Err(LoadError::Uninhabited);
+            Err(LoadError::Uninhabited)
         }
         VariantShape::One(v) => Ok(v),
         VariantShape::Many {

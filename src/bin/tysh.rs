@@ -253,7 +253,9 @@ fn simple_query_cmd(
         // Try parsing as a debug section reference.
         let rest = &type_name[8..];
         if rest.starts_with("info+0x") {
+            // TODO what was I doing  here
         } else if rest.starts_with("types+0x") {
+            // TODO no seriously
         }
     }
 
@@ -357,7 +359,7 @@ fn cmd_info(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
                     println!("- no members");
                 }
 
-                struct_picture(db, s, db.pointer_size() as usize);
+                struct_picture(db, s, db.pointer_size());
             }
             Type::Enum(s) => {
                 println!("enum type");
@@ -425,7 +427,7 @@ fn cmd_info(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
                         }
                     }
                 }
-                enum_picture(db, s, db.pointer_size() as usize);
+                enum_picture(db, s, db.pointer_size());
             }
             Type::CEnum(s) => {
                 println!("C-like enum type");
@@ -561,24 +563,22 @@ fn cmd_def(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
                 
                 if s.members.is_empty() {
                     println!(";");
-                } else {
-                    if s.tuple_like {
-                        println!("(");
-                        for mem in &s.members {
-                            println!("    {},", db.type_name(mem.type_id).unwrap());
-                        }
-                        println!(");");
-                    } else {
-                        println!(" {{");
-                        for mem in &s.members {
-                            if let Some(name) = &mem.name {
-                                println!("    {}: {},", name, db.type_name(mem.type_id).unwrap());
-                            } else {
-                                println!("    ANON: {},", db.type_name(mem.type_id).unwrap());
-                            }
-                        }
-                        println!("}}");
+                } else if s.tuple_like {
+                    println!("(");
+                    for mem in &s.members {
+                        println!("    {},", db.type_name(mem.type_id).unwrap());
                     }
+                    println!(");");
+                } else {
+                    println!(" {{");
+                    for mem in &s.members {
+                        if let Some(name) = &mem.name {
+                            println!("    {}: {},", name, db.type_name(mem.type_id).unwrap());
+                        } else {
+                            println!("    ANON: {},", db.type_name(mem.type_id).unwrap());
+                        }
+                    }
+                    println!("}}");
                 }
             }
             Type::Enum(s) => {
@@ -717,8 +717,8 @@ fn cmd_def(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
 }
 
 fn cmd_addr2line(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
-    let addr = if args.starts_with("0x") {
-        if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
+    let addr = if let Some(rest) = args.strip_prefix("0x") {
+        if let Ok(a) = u64::from_str_radix(rest, 16) {
             a
         } else {
             println!("can't parse {} as an address", args);
@@ -750,8 +750,8 @@ fn cmd_addr2line(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
 }
 
 fn cmd_addr2stack(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
-    let addr = if args.starts_with("0x") {
-        if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
+    let addr = if let Some(rest) = args.strip_prefix("0x") {
+        if let Ok(a) = u64::from_str_radix(rest, 16) {
             a
         } else {
             println!("can't parse {} as an address", args);
@@ -807,14 +807,12 @@ fn cmd_addr2stack(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
 
 fn cmd_vars(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
     for (_id, v) in db.static_variables() {
-        if !args.is_empty() {
-            if !v.name.contains(args) {
-                continue;
-            }
+        if !args.is_empty() && !v.name.contains(args) {
+            continue;
         }
 
         println!("0x{:0width$x} {}: {}", v.location, v.name, NamedGoff(db, v.type_id),
-            width = db.pointer_size() as usize * 2);
+            width = db.pointer_size() * 2);
     }
 }
 
@@ -833,7 +831,7 @@ fn cmd_var(db: &debugdb::DebugDb, ctx: &mut Ctx, args: &str) {
         println!("- address: 0x{:x}", v.location);
         let Some(ty) = db.type_by_id(v.type_id) else { continue };
 
-        match Value::from_state(&ctx.segments, v.location, db, &ty) {
+        match Value::from_state(&ctx.segments, v.location, db, ty) {
             Ok(v) => {
                 println!("- current contents: {}",
                     ValueWithDb(v, db));
@@ -846,8 +844,8 @@ fn cmd_var(db: &debugdb::DebugDb, ctx: &mut Ctx, args: &str) {
 }
 
 fn cmd_addr(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
-    let addr = if args.starts_with("0x") {
-        if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
+    let addr = if let Some(rest) = args.strip_prefix("0x") {
+        if let Ok(a) = u64::from_str_radix(rest, 16) {
             a
         } else {
             println!("can't parse {} as an address", args);
@@ -979,8 +977,8 @@ fn offset_to_path(
 }
 
 fn cmd_unwind(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
-    let addr = if args.starts_with("0x") {
-        if let Ok(a) = u64::from_str_radix(&args[2..], 16) {
+    let addr = if let Some(rest) = args.strip_prefix("0x") {
+        if let Ok(a) = u64::from_str_radix(rest, 16) {
             a
         } else {
             println!("can't parse {} as an address", args);
@@ -1215,12 +1213,10 @@ fn byte_picture(
                 }
                 if let Some(i) = &n {
                     print!("{:^6}", i);
+                } else if off < size {
+                    print!(" pad  ");
                 } else {
-                    if off < size {
-                        print!(" pad  ");
-                    } else {
-                        print!("      ");
-                    }
+                    print!("      ");
                 }
                 current = Some(n.clone());
             } else {

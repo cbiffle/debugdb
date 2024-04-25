@@ -50,7 +50,7 @@ impl Value {
     pub fn type_name(&self) -> Cow<'_, str> {
         match self {
             Self::Array(es) => {
-                let elt_type = es.get(0)
+                let elt_type = es.first()
                     .map(|v| v.type_name())
                     .unwrap_or("???".into());
                 format!("[{}; {}]", elt_type, es.len()).into()
@@ -315,9 +315,9 @@ pub enum Base {
 impl Base {
     pub fn as_u64(self) -> Option<u64> {
         match self {
-            Self::U8(x) => return Some(u64::from(x)),
-            Self::U32(x) => return Some(u64::from(x)),
-            Self::U64(x) => return Some(x),
+            Self::U8(x) => Some(u64::from(x)),
+            Self::U32(x) => Some(u64::from(x)),
+            Self::U64(x) => Some(x),
             _ => None,
         }
     }
@@ -359,7 +359,7 @@ impl Load for Base {
             (Encoding::Unsigned, 0) => Ok(Base::Unit),
             _ => {
                 println!("{:?} {}", b.encoding, b.byte_size);
-                return Err(LoadError::UnsupportedType);
+                Err(LoadError::UnsupportedType)
             },
         }
     }

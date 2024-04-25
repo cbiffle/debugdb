@@ -478,7 +478,7 @@ impl DebugDbBuilder {
         // Attempt to unify similarly named types, narrowing the type name index
         // as we go.
         let mut u = crate::unify::State::new(&types);
-        for (_name, homonyms) in &mut type_name_index {
+        for homonyms in type_name_index.values_mut() {
             let mut workset = homonyms.clone();
             let mut group_u = crate::unify::State::new(&types);
             while let Some(t) = workset.pop_first() {
@@ -796,8 +796,8 @@ pub enum FileError {
 }
 
 /// Parses type information from an `object::File`.
-pub fn parse_file<'a>(
-    object: &'a object::File,
+pub fn parse_file(
+    object: &object::File,
 ) -> Result<DebugDb, FileError> {
     let endian = if object.is_little_endian() {
         gimli::RunTimeEndian::Little
@@ -840,7 +840,7 @@ pub fn parse_file<'a>(
                             dwarf
                             .attr_string(&unit, file.path_name())?
                             .bytes())
-                        ).into()
+                        )
                     } else {
                         String::from_utf8_lossy(
                         dwarf
