@@ -684,6 +684,7 @@ fn parse_enumeration_type(
     let mut byte_size = None;
     let mut alignment = None;
     let mut enum_class = false;
+    let mut type_id = None;
 
     let mut attrs = entry.attrs();
     while let Some(attr) = attrs.next()? {
@@ -699,6 +700,17 @@ fn parse_enumeration_type(
             }
             gim_con::DW_AT_enum_class => {
                 enum_class = attr.value() == gimli::AttributeValue::Flag(true);
+            }
+            gim_con::DW_AT_type => {
+                if let gimli::AttributeValue::UnitRef(o) = attr.value() {
+                    type_id = Some(o.to_unit_section_offset(unit));
+                } else if let gimli::AttributeValue::DebugInfoRef(o) =
+                    attr.value()
+                {
+                    type_id = Some(o.into());
+                } else {
+                    panic!("unexpected type type: {:?}", attr.value());
+                }
             }
             _ => (),
         }
@@ -734,6 +746,7 @@ fn parse_enumeration_type(
 
     builder.record_type(CEnum {
         name,
+        repr_type_id: TypeId(type_id.unwrap()),
         offset,
         enum_class,
         byte_size,

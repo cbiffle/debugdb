@@ -431,6 +431,7 @@ fn cmd_info(db: &debugdb::DebugDb, _ctx: &mut Ctx, args: &str) {
             }
             Type::CEnum(s) => {
                 println!("C-like enum type");
+                println!("- representation: {}", NamedGoff(db, s.repr_type_id));
                 println!("- byte size: {}", s.byte_size);
                 if let Some(a) = s.alignment {
                     println!("- alignment: {a}");

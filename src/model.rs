@@ -333,6 +333,8 @@ pub struct Enum {
 pub struct CEnum {
     /// Name of the enum type.
     pub name: String,
+    /// Representation type.
+    pub repr_type_id: TypeId,
     /// Flag indicating that this enum is a distinct type, rather than
     /// evaluating as values of some base type. This is set for all enums in
     /// Rust, some enums in C++, and no enums in C.
