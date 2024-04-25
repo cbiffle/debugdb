@@ -696,16 +696,18 @@ fn parse_enumeration_type(
         }
     }
 
+    let byte_size = byte_size.unwrap();
+    let name = name.unwrap();
+
     let mut enumerators = IndexMap::default();
 
-    let name = name.unwrap();
     if entry.has_children() {
         builder.path_component(name.clone(), |_| {
             while let Some(()) = cursor.next_entry()? {
                 if let Some(child) = cursor.current() {
                     match child.tag() {
                         gim_con::DW_TAG_enumerator => {
-                            let e = parse_enumerator(dwarf, unit, cursor)?;
+                            let e = parse_enumerator(dwarf, unit, cursor, byte_size)?;
                             enumerators.insert(e.const_value, e);
                         }
                         _ => {
@@ -720,7 +722,6 @@ fn parse_enumeration_type(
         })?;
     }
 
-    let byte_size = byte_size.unwrap();
     let name = builder.format_path(name);
 
     builder.record_type(CEnum {
@@ -738,6 +739,7 @@ fn parse_enumerator(
     dwarf: &gimli::Dwarf<RtArcReader>,
     unit: &gimli::Unit<RtArcReader>,
     cursor: &mut gimli::EntriesCursor<'_, '_, RtArcReader>,
+    byte_size: u64,
 ) -> Result<Enumerator, ParseError> {
     let entry = cursor.current().unwrap();
     assert!(entry.tag() == gim_con::DW_TAG_enumerator);
@@ -767,6 +769,12 @@ fn parse_enumerator(
 
     let name = name.unwrap();
     let const_value = const_value.unwrap();
+    let mask = if byte_size == 8 {
+        !0
+    } else {
+        (1 << (byte_size * 8)) - 1
+    };
+    let const_value = const_value & mask;
 
     Ok(Enumerator {
         name,
