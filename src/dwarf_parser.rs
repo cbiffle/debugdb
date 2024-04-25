@@ -597,6 +597,10 @@ fn parse_variant(
     while let Some(attr) = attrs.next()? {
         match attr.name() {
             gim_con::DW_AT_discr_value => {
+                // TODO: DWARF explicitly does not require this to be unsigned!
+                // It so happens that Rust tends to generated it unsigned, but
+                // as explicit discriminator values become available in more and
+                // more places, this could easily become wrong.
                 discr_value = Some(attr.value().udata_value().unwrap());
             }
             gim_con::DW_AT_decl_file => {
